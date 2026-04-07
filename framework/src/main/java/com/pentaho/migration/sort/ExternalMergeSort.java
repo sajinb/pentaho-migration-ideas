@@ -84,22 +84,27 @@ public final class ExternalMergeSort {
             currentChunkBytes += rowBytes;
 
             if (currentChunkBytes >= config.getChunkSizeBytes()) {
-                chunks.add(flushChunk(currentChunk));
+                chunks.add(flushChunk(currentChunk, currentChunkBytes));
                 currentChunk = new ArrayList<>();
                 currentChunkBytes = 0;
             }
         }
 
         if (!currentChunk.isEmpty()) {
-            chunks.add(flushChunk(currentChunk));
+            chunks.add(flushChunk(currentChunk, currentChunkBytes));
         }
 
         return chunks;
     }
 
-    private TempChunkFile flushChunk(List<Row> rows) throws IOException {
+    /**
+     * @param chunkBytes sum of RowSerializer.serializedSize() for every row in the chunk,
+     *                   already computed during accumulation — avoids a second scan.
+     */
+    private TempChunkFile flushChunk(List<Row> rows, long chunkBytes) throws IOException {
         rows.sort(config.getComparator());
-        return TempChunkFile.write(rows, config.getTempDir());
+        long totalFileSize = 8L + chunkBytes; // 8-byte row-count header + row data
+        return TempChunkFile.write(rows, totalFileSize, config.getTempDir());
     }
 
     // -------------------------------------------------------------------------

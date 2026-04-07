@@ -40,27 +40,27 @@ public final class TempChunkFile {
     // -------------------------------------------------------------------------
 
     /**
-     * Sorts rows are already sorted by the caller. This method pre-allocates a
-     * temp file of exactly the right size and writes all rows via MappedByteBuffer.
+     * Rows are already sorted by the caller. {@code totalFileSize} must equal
+     * {@code 8 + sum(RowSerializer.serializedSize(row)) for row in sortedRows} —
+     * the caller pre-computes this during accumulation so we avoid a second scan.
+     *
+     * buf.force() is intentionally omitted: we are writing a temp file that is
+     * read back in the same JVM on the same OS. The page cache guarantees that
+     * a subsequent READ mapping sees the same (dirty) pages without a disk flush.
      */
-    public static TempChunkFile write(List<Row> sortedRows, Path tempDir) throws IOException {
+    public static TempChunkFile write(List<Row> sortedRows, long totalFileSize,
+                                      Path tempDir) throws IOException {
         Path file = Files.createTempFile(tempDir, "extsort_", ".tmp");
-
-        // Compute exact file size upfront so we can pre-allocate and map once.
-        long totalBytes = 8L; // row count header
-        for (Row row : sortedRows) {
-            totalBytes += RowSerializer.serializedSize(row);
-        }
 
         try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "rw");
              FileChannel channel = raf.getChannel()) {
-            raf.setLength(totalBytes);
-            MappedByteBuffer buf = channel.map(FileChannel.MapMode.READ_WRITE, 0, totalBytes);
+            raf.setLength(totalFileSize);
+            MappedByteBuffer buf = channel.map(FileChannel.MapMode.READ_WRITE, 0, totalFileSize);
             buf.putLong(sortedRows.size());
             for (Row row : sortedRows) {
                 RowSerializer.write(buf, row);
             }
-            buf.force();
+            // No buf.force() — see Javadoc above
         }
 
         return new TempChunkFile(file);
@@ -89,7 +89,7 @@ public final class TempChunkFile {
             while (rows.hasNext()) {
                 RowSerializer.write(buf, rows.next());
             }
-            buf.force();
+            // No buf.force() — same-JVM page-cache guarantee applies here too
         }
 
         return new TempChunkFile(file);

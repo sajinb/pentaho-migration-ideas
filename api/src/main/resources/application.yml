@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: pentaho-migration-api
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# Migration engine configuration
+engine:
+  # Directory for BroadcastBuffer temp files (fan-out materialisation)
+  temp-dir: ${java.io.tmpdir}
+  # Number of concurrent pipeline/job executions
+  execution-pool-size: 4

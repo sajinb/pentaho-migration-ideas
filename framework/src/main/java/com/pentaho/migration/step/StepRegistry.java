@@ -40,6 +40,8 @@ public final class StepRegistry {
         r.register("GetFileNames",     GetFileNamesStep.class);
         r.register("RowsFromResult",   RowsFromResultStep.class);
         r.register("MappingInput",     MappingInputStep.class);
+        r.register("TableInput",       TableInputStep.class);
+        r.register("ExcelInput",       ExcelInputStep.class);
 
         // --- Sink steps ---
         r.register("TextFileOutput",   TextFileOutputStep.class);
@@ -47,6 +49,9 @@ public final class StepRegistry {
         r.register("RowsToResult",     RowsToResultStep.class);
         r.register("MappingOutput",    MappingOutputStep.class);
         r.register("DetectEmptyStream", DetectEmptyStreamStep.class);
+        r.register("TableOutput",      TableOutputStep.class);
+        r.register("ExcelOutput",      ExcelOutputStep.class);
+        r.register("TypeExitExcelWriter", TypeExitExcelWriterStep.class);
 
         // --- Pattern A: streaming single-row transforms ---
         r.register("SelectValues",         SelectValuesStep.class);
@@ -83,6 +88,9 @@ public final class StepRegistry {
         r.register("Validator",            ValidatorStep.class);
         r.register("Rest",                 RestStep.class);
         r.register("SplitFieldToRows3",    SplitFieldToRowsStep.class);
+        r.register("InsertUpdate",         InsertUpdateStep.class);
+        r.register("Delete",               DeleteStep.class);
+        r.register("ExecSQL",              ExecSQLStep.class);
 
         // --- Pattern B: blocking steps ---
         r.register("SortRows",             SortRowsStep.class);

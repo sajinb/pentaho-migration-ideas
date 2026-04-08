@@ -1,5 +1,6 @@
 package com.pentaho.migration.api.config;
 
+import com.pentaho.migration.converter.PentahoProjectConverter;
 import com.pentaho.migration.engine.JobExecutor;
 import com.pentaho.migration.engine.TransformationExecutor;
 import com.pentaho.migration.entry.JobEntryRegistry;
@@ -49,6 +50,11 @@ public class EngineConfig {
     @Bean
     public JobExecutor jobExecutor(JobEntryRegistry jobEntryRegistry) {
         return new JobExecutor(jobEntryRegistry);
+    }
+
+    @Bean
+    public PentahoProjectConverter pentahoProjectConverter() {
+        return new PentahoProjectConverter();
     }
 
     /**

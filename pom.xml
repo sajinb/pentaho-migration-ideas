@@ -11,6 +11,7 @@
 
     <modules>
         <module>framework</module>
+        <module>converter</module>
         <module>api</module>
     </modules>
 

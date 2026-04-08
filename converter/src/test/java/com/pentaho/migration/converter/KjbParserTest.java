@@ -1,0 +1,213 @@
+package com.pentaho.migration.converter;
+
+import com.pentaho.migration.model.EntryDefinition;
+import com.pentaho.migration.model.EntryHopDefinition;
+import com.pentaho.migration.model.JobDefinition;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class KjbParserTest {
+
+    private final KjbParser parser = new KjbParser();
+
+    private JobDefinition parse(String xml) throws Exception {
+        return parser.parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Minimal KJB: Start → RunTransformation → Success
+    // -------------------------------------------------------------------------
+
+    @Test
+    void basicJob_parsedCorrectly() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>daily_job</name>
+              <entries>
+                <entry>
+                  <name>START</name>
+                  <type>SPECIAL</type>
+                  <start>Y</start>
+                </entry>
+                <entry>
+                  <name>run_transform</name>
+                  <type>TRANS</type>
+                  <filename>transformations/customer_sort.ktr</filename>
+                </entry>
+                <entry>
+                  <name>SUCCESS</name>
+                  <type>SPECIAL</type>
+                  <success>Y</success>
+                </entry>
+              </entries>
+              <hops>
+                <hop>
+                  <from>START</from><to>run_transform</to>
+                  <enabled>Y</enabled>
+                  <unconditional>Y</unconditional>
+                </hop>
+                <hop>
+                  <from>run_transform</from><to>SUCCESS</to>
+                  <enabled>Y</enabled>
+                  <evaluation>true</evaluation>
+                  <unconditional>N</unconditional>
+                </hop>
+              </hops>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("daily_job", def.name);
+        assertEquals(3, def.entries.size());
+        assertEquals(2, def.hops.size());
+    }
+
+    // -------------------------------------------------------------------------
+    // SPECIAL entry type resolution
+    // -------------------------------------------------------------------------
+
+    @Test
+    void startEntry_parsedAsStartType() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>j</name>
+              <entries>
+                <entry><name>START</name><type>SPECIAL</type><start>Y</start></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+        assertEquals("Start", def.entries.get(0).type);
+    }
+
+    @Test
+    void successEntry_parsedAsSuccessType() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>j</name>
+              <entries>
+                <entry><name>SUCCESS</name><type>SPECIAL</type><success>Y</success></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        assertEquals("Success", parse(kjb).entries.get(0).type);
+    }
+
+    @Test
+    void abortEntry_parsedAsAbortType() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>j</name>
+              <entries>
+                <entry><name>ABORT</name><type>SPECIAL</type><abort>Y</abort></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        assertEquals("Abort", parse(kjb).entries.get(0).type);
+    }
+
+    // -------------------------------------------------------------------------
+    // RunTransformation: .ktr extension converted to .yaml in transformationPath
+    // -------------------------------------------------------------------------
+
+    @Test
+    void transEntry_filenameExtensionConvertedToYaml() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>j</name>
+              <entries>
+                <entry>
+                  <name>run</name>
+                  <type>TRANS</type>
+                  <filename>transformations/customer_sort.ktr</filename>
+                </entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        EntryDefinition ed = parse(kjb).entries.get(0);
+        assertEquals("RunTransformation", ed.type);
+        assertEquals("transformations/customer_sort.yaml", ed.params.get("transformationPath"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Hop evaluation mapping
+    // -------------------------------------------------------------------------
+
+    @Test
+    void hopEvaluation_unconditional() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job><name>j</name><entries/>
+              <hops>
+                <hop><from>a</from><to>b</to><enabled>Y</enabled>
+                     <unconditional>Y</unconditional></hop>
+              </hops>
+            </job>
+            """;
+
+        EntryHopDefinition hop = parse(kjb).hops.get(0);
+        assertEquals("unconditional", hop.evaluation);
+    }
+
+    @Test
+    void hopEvaluation_success() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job><name>j</name><entries/>
+              <hops>
+                <hop><from>a</from><to>b</to><enabled>Y</enabled>
+                     <evaluation>true</evaluation><unconditional>N</unconditional></hop>
+              </hops>
+            </job>
+            """;
+
+        assertEquals("success", parse(kjb).hops.get(0).evaluation);
+    }
+
+    @Test
+    void hopEvaluation_failure() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job><name>j</name><entries/>
+              <hops>
+                <hop><from>a</from><to>b</to><enabled>Y</enabled>
+                     <evaluation>false</evaluation><unconditional>N</unconditional></hop>
+              </hops>
+            </job>
+            """;
+
+        assertEquals("failure", parse(kjb).hops.get(0).evaluation);
+    }
+
+    @Test
+    void hopEnabled_N_skipped() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job><name>j</name><entries/>
+              <hops>
+                <hop><from>a</from><to>b</to><enabled>N</enabled></hop>
+              </hops>
+            </job>
+            """;
+
+        assertTrue(parse(kjb).hops.isEmpty(), "Disabled hops should be excluded");
+    }
+}

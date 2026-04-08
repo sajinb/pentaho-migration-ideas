@@ -8,6 +8,11 @@ spring:
     serialization:
       write-dates-as-timestamps: false
     default-property-inclusion: non_null
+  # Allow large file uploads
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
 
 management:
   endpoints:
@@ -18,9 +23,18 @@ management:
     health:
       show-details: always
 
-# Migration engine configuration
+# ─── Database ────────────────────────────────────────────────────────────────
+# Defaults to H2 embedded (zero-config for dev/test).
+# For PostgreSQL, set environment variables:
+#   JDBC_URL=jdbc:postgresql://host:5432/pentaho_migration
+#   JDBC_USER=migration
+#   JDBC_PASSWORD=secret
+db:
+  url:      ${JDBC_URL:jdbc:h2:mem:pentaho_migration;DB_CLOSE_DELAY=-1}
+  username: ${JDBC_USER:sa}
+  password: ${JDBC_PASSWORD:}
+
+# ─── Engine ──────────────────────────────────────────────────────────────────
 engine:
-  # Directory for BroadcastBuffer temp files (fan-out materialisation)
   temp-dir: ${java.io.tmpdir}
-  # Number of concurrent pipeline/job executions
   execution-pool-size: 4

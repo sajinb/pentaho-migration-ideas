@@ -13,6 +13,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Smoke tests: verifies the Spring context loads and the REST endpoints respond correctly.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
 class ApplicationTest {
 
     @LocalServerPort  int port;

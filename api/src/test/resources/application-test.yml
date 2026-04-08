@@ -1,0 +1,5 @@
+# Test profile — uses a separate H2 in-memory database
+db:
+  url:      jdbc:h2:mem:pentaho_migration_test;DB_CLOSE_DELAY=-1
+  username: sa
+  password:

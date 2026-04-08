@@ -15,8 +15,26 @@ import static com.pentaho.migration.converter.step.XmlHelper.*;
  * (or as a reference to a named connection defined at the transformation level).
  * This mapper extracts inline connection details when present; named connections
  * must be resolved by the caller ({@link com.pentaho.migration.converter.KtrParser}).
+ *
+ * <p>The emitted params are compatible with both the legacy {@code jdbcDriver} +
+ * {@code jdbcUrl} style and the new {@code dbType} shorthand supported by
+ * {@link com.pentaho.migration.step.impl.JdbcUtil}.
  */
 public final class TableInputMapper implements StepXmlMapper {
+
+    /**
+     * Maps Pentaho connection type names (from {@code <type>}) to the {@code dbType}
+     * shorthand understood by {@code JdbcUtil}.
+     */
+    private static final Map<String, String> DB_TYPE_MAP = Map.of(
+            "ORACLE",      "oracle",
+            "MYSQL",       "mysql",
+            "POSTGRESQL",  "postgresql",
+            "MSSQLNATIVE", "sqlserver",
+            "MSSQL",       "sqlserver",
+            "H2",          "h2",
+            "DB2",         "db2"
+    );
 
     @Override
     public Map<String, String> map(Element e) {
@@ -26,10 +44,7 @@ public final class TableInputMapper implements StepXmlMapper {
         NodeList connNodes = e.getElementsByTagName("connection");
         if (connNodes.getLength() > 0) {
             Element conn = (Element) connNodes.item(0);
-            put(p, "jdbcUrl",      buildUrl(conn));
-            put(p, "jdbcDriver",   child(conn, "driver"));
-            put(p, "jdbcUser",     child(conn, "username"));
-            put(p, "jdbcPassword", child(conn, "password"));
+            mapConnection(conn, p);
         }
 
         // Raw SQL query
@@ -38,25 +53,61 @@ public final class TableInputMapper implements StepXmlMapper {
         return p;
     }
 
-    /** Builds a JDBC URL from Pentaho connection XML when the full URL is not explicit. */
-    private static String buildUrl(Element conn) {
-        String url = child(conn, "jdbcUrl");
-        if (url != null) return url;
-        // Pentaho stores host/port/dbname — try to assemble a generic URL
-        String type = child(conn, "type", "");
-        String host = child(conn, "server", "localhost");
-        String port = child(conn, "port", "");
-        String db   = child(conn, "database", "");
-        return switch (type.toUpperCase()) {
-            case "MYSQL"      -> "jdbc:mysql://" + host + (port.isEmpty() ? "" : ":" + port) + "/" + db;
-            case "POSTGRESQL" -> "jdbc:postgresql://" + host + (port.isEmpty() ? "" : ":" + port) + "/" + db;
-            case "ORACLE"     -> "jdbc:oracle:thin:@" + host + ":" + (port.isEmpty() ? "1521" : port) + ":" + db;
-            case "MSSQLNATIVE"-> "jdbc:sqlserver://" + host + (port.isEmpty() ? "" : ":" + port) + ";databaseName=" + db;
-            default           -> null;
-        };
+    /**
+     * Extracts JDBC params from a Pentaho {@code <connection>} element.
+     *
+     * <p>Priority for driver/URL resolution:
+     * <ol>
+     *   <li>If {@code <driver>} is set explicitly, emit as {@code jdbcDriver}
+     *   <li>Otherwise emit {@code dbType} derived from {@code <type>} — JdbcUtil resolves the driver
+     * </ol>
+     *
+     * <p>Priority for URL:
+     * <ol>
+     *   <li>If {@code <jdbcUrl>} is set explicitly, use it
+     *   <li>Otherwise emit individual params ({@code jdbcHost}, {@code jdbcPort}, etc.)
+     *       and let JdbcUtil build the URL
+     * </ol>
+     */
+    private static void mapConnection(Element conn, Map<String, String> p) {
+        // --- Driver ---
+        String explicitDriver = child(conn, "driver");
+        if (explicitDriver != null && !explicitDriver.isBlank()) {
+            p.put("jdbcDriver", explicitDriver);
+        } else {
+            String pentahoType = child(conn, "type", "").toUpperCase();
+            String dbType = DB_TYPE_MAP.get(pentahoType);
+            if (dbType != null) {
+                p.put("dbType", dbType);
+            }
+        }
+
+        // --- URL ---
+        String explicitUrl = child(conn, "jdbcUrl");
+        if (explicitUrl != null && !explicitUrl.isBlank()) {
+            p.put("jdbcUrl", explicitUrl);
+        } else {
+            // Emit individual params so JdbcUtil can build the URL
+            put(p, "jdbcHost", child(conn, "server"));
+            put(p, "jdbcPort", child(conn, "port"));
+
+            String pentahoType = child(conn, "type", "").toUpperCase();
+            String dbName = child(conn, "database");
+            if ("ORACLE".equals(pentahoType) && dbName != null) {
+                // Pentaho stores the Oracle SID (or service name) in <database>
+                // Emit as jdbcSid; users can change to jdbcServiceName if needed
+                p.put("jdbcSid", dbName);
+            } else {
+                put(p, "jdbcDatabase", dbName);
+            }
+        }
+
+        // --- Credentials ---
+        put(p, "jdbcUser",     child(conn, "username"));
+        put(p, "jdbcPassword", child(conn, "password"));
     }
 
     private static void put(Map<String, String> map, String key, String value) {
-        if (value != null) map.put(key, value);
+        if (value != null && !value.isBlank()) map.put(key, value);
     }
 }

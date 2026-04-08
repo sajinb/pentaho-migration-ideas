@@ -502,4 +502,42 @@ class JdbcStepsTest {
         List<String[]> passThrough = readCsv(sinkFile);
         assertEquals(2, passThrough.size());
     }
+
+    // -------------------------------------------------------------------------
+    // 11. TableInput — dbType=h2 shorthand (no explicit jdbcDriver)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void tableInput_dbTypeShorthand_opensConnection() throws Exception {
+        String url = freshDbUrl();
+        try (Connection conn = openConn(url)) {
+            conn.setAutoCommit(false);
+            createTable(conn, "SHORTHAND", "val");
+            insertRow(conn, "SHORTHAND", "hello");
+        }
+
+        Path output = tmp.resolve("shorthand_out.csv");
+
+        // Use dbType=h2 instead of jdbcDriver=org.h2.Driver
+        Map<String, String> params = new HashMap<>();
+        params.put("dbType",       "h2");
+        params.put("jdbcUrl",      url);
+        params.put("jdbcUser",     "sa");
+        params.put("jdbcPassword", "");
+        params.put("tableName",    "SHORTHAND");
+
+        TransformationDefinition def = new TransformationDefinition();
+        def.name  = "dbTypeShorthand";
+        def.steps = List.of(
+            step("src", "TableInput",     params),
+            step("out", "TextFileOutput", Map.of("filePath", output.toString()))
+        );
+        def.hops = List.of(hop("src", "out"));
+
+        new TransformationExecutor(StepRegistry.withDefaults()).execute(def);
+
+        List<String[]> rows = readCsv(output);
+        assertEquals(1, rows.size());
+        assertEquals("hello", rows.get(0)[0]);
+    }
 }

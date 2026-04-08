@@ -18,7 +18,7 @@ public record JobExecutionDto(
     public static JobExecutionDto from(JobExecution e) {
         return new JobExecutionDto(
                 e.getId(),
-                e.getProjectId(),
+                e.getProject().getId(),
                 e.getStatus().name(),
                 e.getStartedAt(),
                 e.getCompletedAt(),

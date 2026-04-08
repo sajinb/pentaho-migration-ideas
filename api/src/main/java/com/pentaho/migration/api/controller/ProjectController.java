@@ -1,12 +1,12 @@
 package com.pentaho.migration.api.controller;
 
-import com.pentaho.migration.api.NotFoundException;
 import com.pentaho.migration.api.domain.JobExecution;
 import com.pentaho.migration.api.domain.Project;
 import com.pentaho.migration.api.dto.JobExecutionDto;
 import com.pentaho.migration.api.dto.ProjectDto;
 import com.pentaho.migration.api.dto.ProjectSummaryDto;
 import com.pentaho.migration.api.service.ProjectService;
+import jakarta.persistence.EntityNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -59,14 +59,14 @@ public class ProjectController {
     // -------------------------------------------------------------------------
 
     @GetMapping
-    public List<ProjectSummaryDto> list() throws Exception {
+    public List<ProjectSummaryDto> list() {
         return projectService.listProjects().stream()
                 .map(ProjectSummaryDto::from)
                 .toList();
     }
 
     @GetMapping("/{id}")
-    public ProjectDto get(@PathVariable UUID id) throws Exception {
+    public ProjectDto get(@PathVariable UUID id) {
         return ProjectDto.from(projectService.getProject(id));
     }
 
@@ -75,7 +75,7 @@ public class ProjectController {
     // -------------------------------------------------------------------------
 
     @PostMapping("/{id}/convert")
-    public ProjectDto convert(@PathVariable UUID id) throws Exception {
+    public ProjectDto convert(@PathVariable UUID id) {
         return ProjectDto.from(projectService.convert(id));
     }
 
@@ -84,7 +84,7 @@ public class ProjectController {
     // -------------------------------------------------------------------------
 
     @PostMapping("/{id}/execute")
-    public ResponseEntity<JobExecutionDto> execute(@PathVariable UUID id) throws Exception {
+    public ResponseEntity<JobExecutionDto> execute(@PathVariable UUID id) {
         JobExecution exec = projectService.execute(id);
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(JobExecutionDto.from(exec));
@@ -95,7 +95,7 @@ public class ProjectController {
     // -------------------------------------------------------------------------
 
     @GetMapping("/{id}/executions")
-    public List<JobExecutionDto> listExecutions(@PathVariable UUID id) throws Exception {
+    public List<JobExecutionDto> listExecutions(@PathVariable UUID id) {
         return projectService.listExecutions(id).stream()
                 .map(JobExecutionDto::from)
                 .toList();
@@ -104,7 +104,7 @@ public class ProjectController {
     @GetMapping("/{id}/executions/{eid}")
     public JobExecutionDto getExecution(
             @PathVariable UUID id,
-            @PathVariable UUID eid) throws Exception {
+            @PathVariable UUID eid) {
         return JobExecutionDto.from(projectService.getExecution(id, eid));
     }
 
@@ -112,8 +112,8 @@ public class ProjectController {
     // Error handling
     // -------------------------------------------------------------------------
 
-    @ExceptionHandler(NotFoundException.class)
-    public ResponseEntity<ErrorResponse> notFound(NotFoundException ex) {
+    @ExceptionHandler(EntityNotFoundException.class)
+    public ResponseEntity<ErrorResponse> notFound(EntityNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(new ErrorResponse(ex.getMessage()));
     }

@@ -2,15 +2,17 @@ package com.pentaho.migration.api.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.pentaho.migration.api.NotFoundException;
 import com.pentaho.migration.api.domain.*;
-import com.pentaho.migration.api.repository.JobExecutionDao;
-import com.pentaho.migration.api.repository.ProjectDao;
+import com.pentaho.migration.api.domain.JobExecution.ExecutionStatus;
+import com.pentaho.migration.api.repository.JobExecutionRepository;
+import com.pentaho.migration.api.repository.ProjectRepository;
 import com.pentaho.migration.converter.PentahoProjectConverter;
 import com.pentaho.migration.engine.JobExecutor;
 import com.pentaho.migration.model.JobDefinition;
+import jakarta.persistence.EntityNotFoundException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -18,12 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
-import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -31,35 +30,34 @@ import java.util.zip.ZipOutputStream;
 @Service
 public class ProjectService {
 
-    private static final Logger LOG = Logger.getLogger(ProjectService.class.getName());
-
-    private final ProjectDao        projectDao;
-    private final JobExecutionDao   executionDao;
+    private final ProjectRepository       projectRepository;
+    private final JobExecutionRepository  jobExecutionRepository;
     private final PentahoProjectConverter converter;
-    private final JobExecutor       jobExecutor;
-    private final ExecutorService   executionPool;
-    private final ObjectMapper      yamlMapper;
+    private final JobExecutor             jobExecutor;
+    private final ExecutorService         executionPool;
+    private final ObjectMapper            yamlMapper;
 
     public ProjectService(
-            ProjectDao projectDao,
-            JobExecutionDao executionDao,
+            ProjectRepository projectRepository,
+            JobExecutionRepository jobExecutionRepository,
             PentahoProjectConverter converter,
             JobExecutor jobExecutor,
             @Qualifier("executionPool") ExecutorService executionPool) {
-        this.projectDao    = projectDao;
-        this.executionDao  = executionDao;
-        this.converter     = converter;
-        this.jobExecutor   = jobExecutor;
-        this.executionPool = executionPool;
-        this.yamlMapper    = new ObjectMapper(new YAMLFactory());
+        this.projectRepository      = projectRepository;
+        this.jobExecutionRepository = jobExecutionRepository;
+        this.converter              = converter;
+        this.jobExecutor            = jobExecutor;
+        this.executionPool          = executionPool;
+        this.yamlMapper             = new ObjectMapper(new YAMLFactory());
     }
 
     // -------------------------------------------------------------------------
-    // Create project
+    // Create project from uploaded files
     // -------------------------------------------------------------------------
 
+    @Transactional
     public Project createProject(String name, MultipartFile kjbFile, List<MultipartFile> ktrFiles)
-            throws Exception {
+            throws IOException {
 
         if (kjbFile == null || kjbFile.isEmpty())
             throw new IllegalArgumentException("A .kjb file is required");
@@ -78,56 +76,55 @@ public class ProjectService {
         Project project = new Project();
         project.setName(name);
         project.setStatus(ProjectStatus.UPLOADED);
-        projectDao.insert(project);
-
-        UUID pid = project.getId();
+        project = projectRepository.save(project);
 
         ProjectFile kjb = new ProjectFile();
-        kjb.setProjectId(pid);
+        kjb.setProject(project);
         kjb.setFilename(kjbName);
         kjb.setFileType(FileType.KJB);
         kjb.setContent(kjbFile.getBytes());
-        projectDao.insertFile(kjb);
         project.getFiles().add(kjb);
 
         for (MultipartFile ktr : ktrFiles) {
             ProjectFile ktrFile = new ProjectFile();
-            ktrFile.setProjectId(pid);
+            ktrFile.setProject(project);
             ktrFile.setFilename(ktr.getOriginalFilename());
             ktrFile.setFileType(FileType.KTR);
             ktrFile.setContent(ktr.getBytes());
-            projectDao.insertFile(ktrFile);
             project.getFiles().add(ktrFile);
         }
 
-        return project;
+        return projectRepository.save(project);
     }
 
     // -------------------------------------------------------------------------
     // List / get
     // -------------------------------------------------------------------------
 
-    public List<Project> listProjects() throws Exception {
-        return projectDao.findAll();
+    @Transactional(readOnly = true)
+    public List<Project> listProjects() {
+        return projectRepository.findAllOrderByCreatedAtDesc();
     }
 
-    public Project getProject(UUID id) throws Exception {
-        return projectDao.findById(id)
-                .orElseThrow(() -> new NotFoundException("Project not found: " + id));
+    @Transactional(readOnly = true)
+    public Project getProject(UUID id) {
+        return projectRepository.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException("Project not found: " + id));
     }
 
     // -------------------------------------------------------------------------
     // Convert: KJB/KTR → YAML
     // -------------------------------------------------------------------------
 
-    public Project convert(UUID projectId) throws Exception {
-        Project project = projectDao.findById(projectId)
-                .orElseThrow(() -> new NotFoundException("Project not found: " + projectId));
+    @Transactional
+    public Project convert(UUID projectId) {
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new EntityNotFoundException("Project not found: " + projectId));
 
+        project.getYamlDefinitions().clear();
         project.setStatus(ProjectStatus.CONVERTING);
         project.setErrorMessage(null);
-        projectDao.update(project);
-        projectDao.deleteYamls(projectId);
+        project = projectRepository.save(project);
 
         Path inputZip  = null;
         Path outputZip = null;
@@ -151,7 +148,6 @@ public class ProjectService {
                     .findFirst().orElse("")
                     .replaceAll("(?i)\\.kjb$", ".yaml");
 
-            List<YamlDefinition> yamls = new ArrayList<>();
             try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(outputZip))) {
                 ZipEntry entry;
                 while ((entry = zin.getNextEntry()) != null) {
@@ -160,20 +156,18 @@ public class ProjectService {
                     String content  = new String(zin.readAllBytes(), StandardCharsets.UTF_8);
 
                     YamlDefinition yaml = new YamlDefinition();
-                    yaml.setProjectId(projectId);
+                    yaml.setProject(project);
                     yaml.setFilename(yamlName);
                     yaml.setDefinitionType(yamlName.equals(kjbYamlName)
                             ? YamlDefinition.DefinitionType.JOB
                             : YamlDefinition.DefinitionType.TRANSFORMATION);
                     yaml.setContent(content);
-                    projectDao.insertYaml(yaml);
-                    yamls.add(yaml);
+                    project.getYamlDefinitions().add(yaml);
                     zin.closeEntry();
                 }
             }
 
             project.setStatus(ProjectStatus.CONVERTED);
-            project.setYamlDefinitions(yamls);
 
         } catch (Exception e) {
             project.setStatus(ProjectStatus.CONVERSION_FAILED);
@@ -183,18 +177,17 @@ public class ProjectService {
             safeDelete(outputZip);
         }
 
-        projectDao.update(project);
-
-        return projectDao.findById(projectId).orElseThrow();
+        return projectRepository.save(project);
     }
 
     // -------------------------------------------------------------------------
     // Execute job asynchronously
     // -------------------------------------------------------------------------
 
-    public JobExecution execute(UUID projectId) throws Exception {
-        Project project = projectDao.findById(projectId)
-                .orElseThrow(() -> new NotFoundException("Project not found: " + projectId));
+    @Transactional
+    public JobExecution execute(UUID projectId) {
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new EntityNotFoundException("Project not found: " + projectId));
 
         if (project.getStatus() != ProjectStatus.CONVERTED)
             throw new IllegalStateException(
@@ -214,9 +207,9 @@ public class ProjectService {
         }
 
         JobExecution execution = new JobExecution();
-        execution.setProjectId(projectId);
-        execution.setStatus(JobExecution.ExecutionStatus.PENDING);
-        executionDao.insert(execution);
+        execution.setProject(project);
+        execution.setStatus(ExecutionStatus.PENDING);
+        execution = jobExecutionRepository.save(execution);
 
         final UUID execId = execution.getId();
         executionPool.submit(() -> runJobAsync(execId, jobDef));
@@ -225,59 +218,38 @@ public class ProjectService {
     }
 
     private void runJobAsync(UUID execId, JobDefinition jobDef) {
+        JobExecution exec = jobExecutionRepository.findById(execId).orElseThrow();
+        exec.setStatus(ExecutionStatus.RUNNING);
+        exec.setStartedAt(Instant.now());
+        jobExecutionRepository.save(exec);
+
         Instant start = Instant.now();
         try {
-            JobExecution exec = executionDao.findById(execId).orElseThrow();
-            exec.setStatus(JobExecution.ExecutionStatus.RUNNING);
-            exec.setStartedAt(start);
-            executionDao.update(exec);
-
-            boolean success;
-            String errorMsg = null;
-            try {
-                success = jobExecutor.execute(jobDef);
-                if (!success) errorMsg = "Job returned failure";
-            } catch (Exception e) {
-                success = false;
-                errorMsg = e.getMessage();
-            }
-
-            exec = executionDao.findById(execId).orElseThrow();
-            exec.setStatus(success
-                    ? JobExecution.ExecutionStatus.COMPLETED
-                    : JobExecution.ExecutionStatus.FAILED);
-            exec.setErrorMessage(errorMsg);
-            exec.setCompletedAt(Instant.now());
-            exec.setDurationMs(Instant.now().toEpochMilli() - start.toEpochMilli());
-            executionDao.update(exec);
-
+            boolean success = jobExecutor.execute(jobDef);
+            exec = jobExecutionRepository.findById(execId).orElseThrow();
+            exec.setStatus(success ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED);
+            if (!success) exec.setErrorMessage("Job returned failure");
         } catch (Exception e) {
-            LOG.warning("Error in async execution " + execId + ": " + e.getMessage());
-            try {
-                Optional<JobExecution> opt = executionDao.findById(execId);
-                if (opt.isPresent()) {
-                    JobExecution ex = opt.get();
-                    ex.setStatus(JobExecution.ExecutionStatus.FAILED);
-                    ex.setErrorMessage("Internal error: " + e.getMessage());
-                    ex.setCompletedAt(Instant.now());
-                    ex.setDurationMs(Instant.now().toEpochMilli() - start.toEpochMilli());
-                    executionDao.update(ex);
-                }
-            } catch (Exception ignored) {}
+            exec = jobExecutionRepository.findById(execId).orElseThrow();
+            exec.setStatus(ExecutionStatus.FAILED);
+            exec.setErrorMessage(e.getMessage());
         }
+        exec.setCompletedAt(Instant.now());
+        exec.setDurationMs(Instant.now().toEpochMilli() - start.toEpochMilli());
+        jobExecutionRepository.save(exec);
     }
 
     // -------------------------------------------------------------------------
     // Execution queries
     // -------------------------------------------------------------------------
 
-    public List<JobExecution> listExecutions(UUID projectId) throws Exception {
-        return executionDao.findByProjectId(projectId);
+    public List<JobExecution> listExecutions(UUID projectId) {
+        return jobExecutionRepository.findByProjectIdOrderByCreatedAtDesc(projectId);
     }
 
-    public JobExecution getExecution(UUID projectId, UUID execId) throws Exception {
-        return executionDao.findByIdAndProjectId(execId, projectId)
-                .orElseThrow(() -> new NotFoundException(
+    public JobExecution getExecution(UUID projectId, UUID execId) {
+        return jobExecutionRepository.findByIdAndProjectId(execId, projectId)
+                .orElseThrow(() -> new EntityNotFoundException(
                         "Execution not found: " + execId + " for project " + projectId));
     }
 

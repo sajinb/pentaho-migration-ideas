@@ -59,18 +59,50 @@ public final class FilterRowsMapper implements StepXmlMapper {
             Element cond = (Element) condNodes.item(0);
 
             // <leftvalue><name>age</name></leftvalue>  — textContent = "age"
+            // Also handles <leftvalue>ltv_total</leftvalue> (direct text, no child element)
             put(p, "column",   child(cond, "leftvalue"));
 
-            // <function>GT</function>
-            put(p, "operator", child(cond, "function"));
+            // <function>GT</function>  or  <function>&gt;</function> (XML entity → ">")
+            String rawOp = child(cond, "function");
+            put(p, "operator", normalizeOperator(rawOp));
 
             // <rightvalue><value>18</value></rightvalue>  — textContent = "18"
+            // Also: <rightvalue/>  with value in <value><text>5000.0</text></value>
             String val = child(cond, "rightvalue");
             if (val == null || val.isBlank()) val = child(cond, "rightstring");
+            if (val == null || val.isBlank()) {
+                // Pentaho constant format: <value><name>constant</name><text>5000.0</text></value>
+                NodeList valueEls = cond.getElementsByTagName("value");
+                if (valueEls.getLength() > 0) {
+                    val = text((Element) valueEls.item(0), "text");
+                }
+            }
             put(p, "value", val);
         }
 
         return p;
+    }
+
+    /** Maps XML/symbolic operators to the short codes understood by FilterRowsStep. */
+    private static String normalizeOperator(String op) {
+        if (op == null) return null;
+        return switch (op.trim()) {
+            case ">"        -> "GT";
+            case "<"        -> "LT";
+            case ">="       -> "GTE";
+            case "<="       -> "LTE";
+            case "="        -> "EQ";
+            case "<>", "!=" -> "NEQ";
+            default         -> op; // already GT / LT / etc.
+        };
+    }
+
+    /** Returns trimmed text content of the first descendant with {@code tag}, or {@code null}. */
+    private static String text(Element parent, String tag) {
+        NodeList nodes = parent.getElementsByTagName(tag);
+        if (nodes.getLength() == 0) return null;
+        String t = nodes.item(0).getTextContent();
+        return t == null ? null : t.trim();
     }
 
     private static void put(Map<String, String> map, String key, String value) {

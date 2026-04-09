@@ -134,6 +134,10 @@ public final class KtrParser {
         Map<String, String>       upstreamOf    = buildUpstreamMap(doc);
         Map<String, List<String>> downstreamOf  = buildDownstreamMap(doc);
 
+        // Propagate schemas through intermediate steps (SortRows pass-through,
+        // GroupBy → [groupKeys+aggNames], MergeJoin → [left+right], Formula → [in+newField]).
+        propagateSchemas(doc, fieldSchemas, upstreamOf);
+
         TransformationDefinition def = new TransformationDefinition();
         def.name  = extractName(doc);
         def.steps = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf);
@@ -203,6 +207,121 @@ public final class KtrParser {
             }
         }
         return downstream;
+    }
+
+    /**
+     * Propagates field schemas through intermediate steps in up to N passes
+     * (handles non-topological document order).
+     *
+     * <p>Rules:
+     * <ul>
+     *   <li>SortRows, FilterRows, Unique, etc. → pass-through (same schema as upstream)</li>
+     *   <li>GroupBy → [group column names + aggregate output names]</li>
+     *   <li>MergeJoin → [step1 schema + step2 schema]</li>
+     *   <li>Formula → [upstream schema + new field name]</li>
+     * </ul>
+     */
+    private static void propagateSchemas(Document doc,
+                                          Map<String, List<String>> fieldSchemas,
+                                          Map<String, String> upstreamOf) {
+        NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
+        boolean changed = true;
+        for (int pass = 0; pass < 15 && changed; pass++) {
+            changed = false;
+            for (int i = 0; i < stepNodes.getLength(); i++) {
+                Element el = (Element) stepNodes.item(i);
+                if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
+                String stepName = text(el, "name");
+                String stepType = normalizeType(text(el, "type"));
+                if (stepName == null || fieldSchemas.containsKey(stepName)) continue;
+
+                List<String> schema = computeStepOutputSchema(el, stepName, stepType,
+                                                               fieldSchemas, upstreamOf);
+                if (schema != null) {
+                    fieldSchemas.put(stepName, schema);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    private static List<String> computeStepOutputSchema(Element el,
+                                                          String stepName, String stepType,
+                                                          Map<String, List<String>> fieldSchemas,
+                                                          Map<String, String> upstreamOf) {
+        return switch (stepType) {
+            // Pass-through steps: output schema == upstream schema
+            case "SortRows", "FilterRows", "Unique", "UniqueRowsByHashSet",
+                 "BlockingStep", "Normaliser", "WriteToLog", "SelectValues" -> {
+                String up = upstreamOf.get(stepName);
+                yield up != null ? fieldSchemas.get(up) : null;
+            }
+            case "GroupBy", "MemoryGroupBy" -> computeGroupByOutputSchema(el);
+            case "MergeJoin"               -> computeMergeJoinOutputSchema(el, fieldSchemas);
+            case "Formula"                 -> computeFormulaOutputSchema(el, stepName,
+                                                                          fieldSchemas, upstreamOf);
+            default -> null;
+        };
+    }
+
+    /** GroupBy output = [group key names … , aggregate output names …]. */
+    private static List<String> computeGroupByOutputSchema(Element el) {
+        List<String> schema = new ArrayList<>();
+
+        NodeList groupEls = el.getElementsByTagName("group");
+        if (groupEls.getLength() > 0) {
+            Element group = (Element) groupEls.item(0);
+            NodeList fields = group.getElementsByTagName("field");
+            for (int i = 0; i < fields.getLength(); i++) {
+                String name = text((Element) fields.item(i), "name");
+                if (name != null && !name.isBlank()) schema.add(name);
+            }
+        }
+
+        NodeList fieldsEls = el.getElementsByTagName("fields");
+        if (fieldsEls.getLength() > 0) {
+            Element fields = (Element) fieldsEls.item(0);
+            NodeList fieldEls = fields.getElementsByTagName("field");
+            for (int i = 0; i < fieldEls.getLength(); i++) {
+                String aggName = text((Element) fieldEls.item(i), "aggregate");
+                if (aggName != null && !aggName.isBlank()) schema.add(aggName);
+            }
+        }
+
+        return schema.isEmpty() ? null : schema;
+    }
+
+    /** MergeJoin output = left step's schema + right step's schema. */
+    private static List<String> computeMergeJoinOutputSchema(Element el,
+                                                               Map<String, List<String>> fieldSchemas) {
+        String step1 = text(el, "step1");
+        String step2 = text(el, "step2");
+        List<String> left  = step1 != null ? fieldSchemas.get(step1) : null;
+        List<String> right = step2 != null ? fieldSchemas.get(step2) : null;
+        if (left == null || right == null) return null; // upstream not yet resolved
+        List<String> schema = new ArrayList<>(left);
+        schema.addAll(right);
+        return schema;
+    }
+
+    /** Formula output = upstream schema + [new field name]. */
+    private static List<String> computeFormulaOutputSchema(Element el, String stepName,
+                                                             Map<String, List<String>> fieldSchemas,
+                                                             Map<String, String> upstreamOf) {
+        String up = upstreamOf.get(stepName);
+        List<String> upSchema = up != null ? fieldSchemas.get(up) : null;
+
+        // Extract new field name from <formula><field_name>…</field_name></formula>
+        String newField = null;
+        NodeList formulaEls = el.getElementsByTagName("formula");
+        if (formulaEls.getLength() > 0) {
+            newField = text((Element) formulaEls.item(0), "field_name");
+        }
+
+        if (newField == null || newField.isBlank()) return upSchema;
+        List<String> schema = upSchema != null ? new ArrayList<>(upSchema) : new ArrayList<>();
+        schema.add(newField);
+        return schema;
     }
 
     /**
@@ -280,6 +399,15 @@ public final class KtrParser {
                 resolveColumnNames(sd.params, "columns", sd.id, upstreamOf, fieldSchemas);
             } else if ("MergeJoin".equals(sd.type)) {
                 resolveMergeJoinColumns(sd.params, upstreamOf, fieldSchemas);
+            } else if ("GroupBy".equals(sd.type) || "MemoryGroupBy".equals(sd.type)) {
+                resolveColumnNames(sd.params, "groupColumns", sd.id, upstreamOf, fieldSchemas);
+                resolveColumnNames(sd.params, "aggColumns",   sd.id, upstreamOf, fieldSchemas);
+            } else if ("Formula".equals(sd.type)) {
+                // Inject upstream field names so FormulaStep can resolve [name] references.
+                List<String> upSchema = findUpstreamSchema(sd.id, upstreamOf, fieldSchemas);
+                if (upSchema != null) {
+                    sd.params.put("fieldNames", String.join(",", upSchema));
+                }
             }
 
             steps.add(sd);

@@ -265,9 +265,14 @@ public class ProjectService {
             // Write every YAML definition to a temp directory so RunTransformationEntry
             // can read them by filename (transformationPath is the bare filename).
             yamlDir = Files.createTempDirectory("pentaho-exec-");
-            log.info("[exec:{}] Writing {} YAML file(s) to {}", execId, yamlContents.size(), yamlDir);
+            log.info("[exec:{}] Writing {} YAML file(s) to {}: {}", execId, yamlContents.size(), yamlDir,
+                     yamlContents.keySet());
             for (Map.Entry<String, String> e : yamlContents.entrySet()) {
-                Files.writeString(yamlDir.resolve(e.getKey()), e.getValue());
+                // Key may include a directory prefix (e.g. "subdir/foo.yaml") from the zip entry name.
+                // Create parent dirs so Files.writeString doesn't throw.
+                Path dest = yamlDir.resolve(e.getKey());
+                if (dest.getParent() != null) Files.createDirectories(dest.getParent());
+                Files.writeString(dest, e.getValue());
             }
 
             Map<String, String> context = new HashMap<>();

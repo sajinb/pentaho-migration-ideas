@@ -64,8 +64,11 @@ public final class KjbParser {
 
     private List<EntryDefinition> extractEntries(Document doc) {
         List<EntryDefinition> entries = new ArrayList<>();
-        // <entries> may be the parent, or entries may be direct children
-        NodeList entryNodes = doc.getElementsByTagName("entry");
+        // Real KJBs use <jobentry>; synthetic/test KJBs may use <entry>
+        NodeList entryNodes = doc.getElementsByTagName("jobentry");
+        if (entryNodes.getLength() == 0) {
+            entryNodes = doc.getElementsByTagName("entry");
+        }
         for (int i = 0; i < entryNodes.getLength(); i++) {
             Element el = (Element) entryNodes.item(i);
 
@@ -116,8 +119,9 @@ public final class KjbParser {
         Map<String, String> params = new HashMap<>();
         switch (resolvedType) {
             case "RunTransformation" -> {
-                // <filename> holds the path to the .ktr file — convert extension to .yaml
-                String filename = text(el, "filename");
+                // Real KJBs use <trans_filename>; older/synthetic KJBs use <filename>
+                String filename = text(el, "trans_filename");
+                if (filename == null) filename = text(el, "filename");
                 if (filename != null) {
                     params.put("transformationPath", filename.replaceAll("\\.ktr$", ".yaml"));
                 }
@@ -149,7 +153,11 @@ public final class KjbParser {
 
     private List<EntryHopDefinition> extractHops(Document doc) {
         List<EntryHopDefinition> hops = new ArrayList<>();
-        NodeList hopNodes = doc.getElementsByTagName("hop");
+        // Real KJBs use <jobhop>; synthetic/test KJBs may use <hop>
+        NodeList hopNodes = doc.getElementsByTagName("jobhop");
+        if (hopNodes.getLength() == 0) {
+            hopNodes = doc.getElementsByTagName("hop");
+        }
         for (int i = 0; i < hopNodes.getLength(); i++) {
             Element el = (Element) hopNodes.item(i);
             // Skip disabled hops

@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Parses a Pentaho KTR (transformation) XML document into a {@link TransformationDefinition}.
@@ -148,8 +149,23 @@ public final class KtrParser {
     // -------------------------------------------------------------------------
 
     /**
-     * Builds a map of stepName → ordered field names by scanning every step's
-     * {@code <fields>/<field>/<name>} declarations.
+     * Step types whose {@code <fields>/<field>/<name>} elements declare the output column schema.
+     * Only source steps actually enumerate all output fields this way.
+     * Transform steps (SortRows, GroupBy…) use {@code <fields>} for other purposes
+     * (sort keys, aggregate definitions) and must NOT be treated as schema declarations.
+     */
+    private static final Set<String> SCHEMA_SOURCE_TYPES = Set.of(
+            "CsvInput", "TextFileInput", "ExcelInput",
+            "RowGenerator", "PropertyInput", "GetFileNames", "SystemInfo", "JsonInput"
+    );
+
+    /**
+     * Builds a map of stepName → ordered field names by scanning {@code <fields>/<field>/<name>}
+     * declarations on <em>source</em> steps only.
+     *
+     * <p>Non-source steps (SortRows, GroupBy, …) also use {@code <fields>} for different
+     * purposes (sort keys, aggregate definitions). Collecting those would produce incomplete
+     * or wrong schemas that break downstream column resolution.
      */
     private static Map<String, List<String>> buildFieldSchemas(Document doc) {
         Map<String, List<String>> schemas = new LinkedHashMap<>();
@@ -158,7 +174,8 @@ public final class KtrParser {
             Element el = (Element) stepNodes.item(i);
             if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
             String stepName = text(el, "name");
-            if (stepName == null) continue;
+            String stepType = normalizeType(text(el, "type"));
+            if (stepName == null || !SCHEMA_SOURCE_TYPES.contains(stepType)) continue;
             List<String> names = new ArrayList<>();
             NodeList fieldsEls = el.getElementsByTagName("fields");
             if (fieldsEls.getLength() > 0) {
@@ -260,8 +277,29 @@ public final class KtrParser {
             case "MergeJoin"               -> computeMergeJoinOutputSchema(el, fieldSchemas);
             case "Formula"                 -> computeFormulaOutputSchema(el, stepName,
                                                                           fieldSchemas, upstreamOf);
+            case "Calculator"              -> computeCalculatorOutputSchema(el, stepName,
+                                                                             fieldSchemas, upstreamOf);
             default -> null;
         };
+    }
+
+    /** Calculator output = upstream schema + [field_name from &lt;calculation&gt;]. */
+    private static List<String> computeCalculatorOutputSchema(Element el, String stepName,
+                                                                Map<String, List<String>> fieldSchemas,
+                                                                Map<String, String> upstreamOf) {
+        String up = upstreamOf.get(stepName);
+        List<String> upSchema = up != null ? fieldSchemas.get(up) : null;
+
+        String newField = null;
+        NodeList calcEls = el.getElementsByTagName("calculation");
+        if (calcEls.getLength() > 0) {
+            newField = text((Element) calcEls.item(0), "field_name");
+        }
+
+        if (newField == null || newField.isBlank()) return upSchema;
+        List<String> schema = upSchema != null ? new ArrayList<>(upSchema) : new ArrayList<>();
+        schema.add(newField);
+        return schema;
     }
 
     /** GroupBy output = [group key names … , aggregate output names …]. */
@@ -408,6 +446,10 @@ public final class KtrParser {
                 if (upSchema != null) {
                     sd.params.put("fieldNames", String.join(",", upSchema));
                 }
+            } else if ("Calculator".equals(sd.type)) {
+                // Resolve fieldA / fieldB (column names) to colA / colB (0-based indices).
+                resolveToIndex(sd.params, "fieldA", "colA", sd.id, upstreamOf, fieldSchemas);
+                resolveToIndex(sd.params, "fieldB", "colB", sd.id, upstreamOf, fieldSchemas);
             }
 
             steps.add(sd);
@@ -454,6 +496,26 @@ public final class KtrParser {
             }
         }
         if (changed) params.put(paramKey, String.join(",", tokens));
+    }
+
+    /**
+     * Resolves a single named column from {@code srcParam} to a 0-based index in
+     * {@code destParam}. If the value is already an integer it is copied unchanged.
+     * Used by Calculator to convert {@code fieldA}/{@code fieldB} → {@code colA}/{@code colB}.
+     */
+    private static void resolveToIndex(Map<String, String> params,
+                                        String srcParam, String destParam,
+                                        String stepName,
+                                        Map<String, String> upstreamOf,
+                                        Map<String, List<String>> fieldSchemas) {
+        String name = params.get(srcParam);
+        if (name == null || name.isBlank()) return;
+        if (isInteger(name)) { params.put(destParam, name); return; }
+        List<String> schema = findUpstreamSchema(stepName, upstreamOf, fieldSchemas);
+        if (schema == null) return;
+        int idx = schema.indexOf(name);
+        if (idx >= 0) params.put(destParam, String.valueOf(idx));
+        // If not found, leave absent — CalculatorStep.configure() will NPE with a clear message
     }
 
     /**

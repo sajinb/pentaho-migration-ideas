@@ -38,6 +38,7 @@ public final class StepXmlMapperRegistry {
         r.register("GroupBy",             new GroupByMapper());
         r.register("MemoryGroupBy",       new GroupByMapper());
         r.register("Formula",             new FormulaMapper());
+        r.register("Calculator",          new CalculatorMapper());
         return r;
     }
 }

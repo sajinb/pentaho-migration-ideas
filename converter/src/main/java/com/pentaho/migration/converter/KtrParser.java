@@ -130,12 +130,13 @@ public final class KtrParser {
 
         // Pre-compute field schemas (stepName → ordered field names) and hop topology
         // so KtrParser can resolve column names to 0-based indices before emitting YAML.
-        Map<String, List<String>> fieldSchemas = buildFieldSchemas(doc);
-        Map<String, String>       upstreamOf   = buildUpstreamMap(doc);
+        Map<String, List<String>> fieldSchemas  = buildFieldSchemas(doc);
+        Map<String, String>       upstreamOf    = buildUpstreamMap(doc);
+        Map<String, List<String>> downstreamOf  = buildDownstreamMap(doc);
 
         TransformationDefinition def = new TransformationDefinition();
         def.name  = extractName(doc);
-        def.steps = extractSteps(doc, fieldSchemas, upstreamOf);
+        def.steps = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf);
         def.hops  = extractHops(doc);
         return def;
     }
@@ -183,6 +184,25 @@ public final class KtrParser {
             if (from != null && to != null) upstream.putIfAbsent(to, from);
         }
         return upstream;
+    }
+
+    /**
+     * Builds a map of stepName → list of downstream step names by scanning {@code <hop>} elements.
+     * Used to infer routing targets for FilterRows when send_true_to / send_false_to are absent.
+     */
+    private static Map<String, List<String>> buildDownstreamMap(Document doc) {
+        Map<String, List<String>> downstream = new LinkedHashMap<>();
+        NodeList hopNodes = doc.getElementsByTagName("hop");
+        for (int i = 0; i < hopNodes.getLength(); i++) {
+            Element el = (Element) hopNodes.item(i);
+            String from    = text(el, "from");
+            String to      = text(el, "to");
+            String enabled = text(el, "enabled");
+            if (from != null && to != null && !"N".equalsIgnoreCase(enabled)) {
+                downstream.computeIfAbsent(from, k -> new ArrayList<>()).add(to);
+            }
+        }
+        return downstream;
     }
 
     /**
@@ -235,7 +255,8 @@ public final class KtrParser {
 
     private List<StepDefinition> extractSteps(Document doc,
                                                Map<String, List<String>> fieldSchemas,
-                                               Map<String, String> upstreamOf) {
+                                               Map<String, String> upstreamOf,
+                                               Map<String, List<String>> downstreamOf) {
         List<StepDefinition> steps = new ArrayList<>();
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         for (int i = 0; i < stepNodes.getLength(); i++) {
@@ -250,14 +271,34 @@ public final class KtrParser {
             StepXmlMapper mapper = mapperRegistry.get(sd.type);
             sd.params = mapper.map(el);
 
-            // Resolve column names to 0-based indices for steps that reference field names.
-            if ("FilterRows".equals(sd.type) || "SortRows".equals(sd.type)) {
+            if ("FilterRows".equals(sd.type)) {
+                // Resolve column names to 0-based indices.
+                resolveColumnName(sd.params, sd.id, upstreamOf, fieldSchemas);
+                // Inject trueStep/falseStep from hop topology when absent from step XML.
+                injectFilterRouting(sd.params, sd.id, downstreamOf);
+            } else if ("SortRows".equals(sd.type)) {
                 resolveColumnName(sd.params, sd.id, upstreamOf, fieldSchemas);
             }
 
             steps.add(sd);
         }
         return steps;
+    }
+
+    /**
+     * When {@code <send_true_to>} / {@code <send_false_to>} are absent from the FilterRows
+     * step XML, infer routing from the hop graph:
+     * <ul>
+     *   <li>1 downstream hop → that step receives matching (true) rows; false rows discarded</li>
+     *   <li>2 downstream hops → first is true, second is false</li>
+     * </ul>
+     */
+    private static void injectFilterRouting(Map<String, String> params, String stepId,
+                                             Map<String, List<String>> downstreamOf) {
+        if (params.containsKey("trueStep")) return; // already set by mapper from step XML
+        List<String> targets = downstreamOf.getOrDefault(stepId, List.of());
+        if (!targets.isEmpty()) params.put("trueStep",  targets.get(0));
+        if (targets.size() >= 2) params.put("falseStep", targets.get(1));
     }
 
     private List<HopDefinition> extractHops(Document doc) {

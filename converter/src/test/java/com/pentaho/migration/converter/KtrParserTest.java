@@ -274,9 +274,11 @@ class KtrParserTest {
 
         // FilterRows column "age" resolved to index 2
         StepDefinition filter = def.steps.get(1);
-        assertEquals("2",   filter.params.get("column"));   // 0-based index of "age"
-        assertEquals("GT",  filter.params.get("operator"));
-        assertEquals("18",  filter.params.get("value"));
+        assertEquals("2",          filter.params.get("column"));   // 0-based index of "age"
+        assertEquals("GT",         filter.params.get("operator"));
+        assertEquals("18",         filter.params.get("value"));
+        // trueStep injected from the hop (no <send_true_to> in this KTR)
+        assertEquals("Write CSV",  filter.params.get("trueStep"));
     }
 
     // -------------------------------------------------------------------------

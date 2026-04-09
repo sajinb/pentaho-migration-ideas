@@ -24,6 +24,10 @@ spring:
     password:          ${JDBC_PASSWORD:}
     driver-class-name: ${JDBC_DRIVER_CLASS:org.h2.Driver}
   jpa:
+    # Explicitly set dialect — Hibernate 6 auto-detection can fail in fat-JAR mode.
+    # Override with JPA_DIALECT env var when switching to PostgreSQL:
+    #   JPA_DIALECT=org.hibernate.dialect.PostgreSQLDialect
+    database-platform: ${JPA_DIALECT:org.hibernate.dialect.H2Dialect}
     hibernate:
       ddl-auto: update
     show-sql: false

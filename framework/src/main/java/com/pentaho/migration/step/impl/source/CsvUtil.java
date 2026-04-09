@@ -5,6 +5,9 @@ import com.pentaho.migration.sort.Row;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -36,7 +39,23 @@ public final class CsvUtil {
      * @param skipHeader if true, the first line is skipped
      */
     public static Iterator<Row> streamRows(Path path, boolean skipHeader) throws IOException {
-        BufferedReader br = Files.newBufferedReader(path);
+        return streamRows(Files.newBufferedReader(path), skipHeader);
+    }
+
+    /**
+     * Returns a streaming iterator over rows from an {@link InputStream} (e.g. SFTP).
+     * The stream is closed automatically when the iterator is exhausted or if an
+     * error occurs.
+     *
+     * @param in         input stream (UTF-8 encoded CSV)
+     * @param skipHeader if true, the first line is skipped
+     */
+    public static Iterator<Row> streamRows(InputStream in, boolean skipHeader) throws IOException {
+        return streamRows(new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8)),
+                          skipHeader);
+    }
+
+    private static Iterator<Row> streamRows(BufferedReader br, boolean skipHeader) throws IOException {
         if (skipHeader) br.readLine();
 
         return new Iterator<Row>() {
@@ -52,7 +71,7 @@ public final class CsvUtil {
                     }
                     return line;
                 } catch (IOException e) {
-                    throw new RuntimeException("Error reading CSV: " + path, e);
+                    throw new RuntimeException("Error reading CSV stream", e);
                 }
             }
 

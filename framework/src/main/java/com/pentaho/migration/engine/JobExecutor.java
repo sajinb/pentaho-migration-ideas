@@ -30,12 +30,23 @@ public final class JobExecutor {
     }
 
     /**
-     * Execute the job.
+     * Execute the job with an empty context.
      *
      * @return true if the job completed successfully; false on failure
      */
     public boolean execute(JobDefinition def) throws Exception {
-        Map<String, String> context = new HashMap<>();
+        return execute(def, new HashMap<>());
+    }
+
+    /**
+     * Execute the job with the provided initial context.
+     * Callers may populate {@code basePath} (directory containing YAML files),
+     * or any other key-value pairs that job entries read from context.
+     *
+     * @return true if the job completed successfully; false on failure
+     */
+    public boolean execute(JobDefinition def, Map<String, String> initialContext) throws Exception {
+        Map<String, String> context = new HashMap<>(initialContext);
 
         // Find the START entry
         EntryDefinition start = def.entries.stream()

@@ -21,8 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -219,37 +222,64 @@ public class ProjectService {
             throw new IllegalStateException("Failed to parse job YAML: " + e.getMessage(), e);
         }
 
+        // Snapshot all YAML content (filename → content) so the async thread has
+        // no JPA session dependency and can write them to a temp directory.
+        Map<String, String> yamlContents = new HashMap<>();
+        project.getYamlDefinitions().forEach(y -> yamlContents.put(y.getFilename(), y.getContent()));
+
         JobExecution execution = new JobExecution();
         execution.setProject(project);
         execution.setStatus(ExecutionStatus.PENDING);
         execution = jobExecutionRepository.save(execution);
 
         final UUID execId = execution.getId();
-        executionPool.submit(() -> runJobAsync(execId, jobDef));
+        executionPool.submit(() -> runJobAsync(execId, jobDef, yamlContents));
 
         return execution;
     }
 
-    private void runJobAsync(UUID execId, JobDefinition jobDef) {
+    private void runJobAsync(UUID execId, JobDefinition jobDef, Map<String, String> yamlContents) {
         JobExecution exec = jobExecutionRepository.findById(execId).orElseThrow();
         exec.setStatus(ExecutionStatus.RUNNING);
         exec.setStartedAt(Instant.now());
         jobExecutionRepository.save(exec);
 
+        Path yamlDir = null;
         Instant start = Instant.now();
         try {
-            boolean success = jobExecutor.execute(jobDef);
+            // Write every YAML definition to a temp directory so RunTransformationEntry
+            // can read them by filename (transformationPath is the bare filename).
+            yamlDir = Files.createTempDirectory("pentaho-exec-");
+            for (Map.Entry<String, String> e : yamlContents.entrySet()) {
+                Files.writeString(yamlDir.resolve(e.getKey()), e.getValue());
+            }
+
+            Map<String, String> context = new HashMap<>();
+            context.put("basePath", yamlDir.toString());
+
+            boolean success = jobExecutor.execute(jobDef, context);
             exec = jobExecutionRepository.findById(execId).orElseThrow();
             exec.setStatus(success ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED);
             if (!success) exec.setErrorMessage("Job returned failure");
         } catch (Exception e) {
             exec = jobExecutionRepository.findById(execId).orElseThrow();
             exec.setStatus(ExecutionStatus.FAILED);
-            exec.setErrorMessage(e.getMessage());
+            exec.setErrorMessage(e.getMessage() != null ? e.getMessage()
+                    : e.getClass().getSimpleName());
+        } finally {
+            deleteTempDir(yamlDir);
         }
         exec.setCompletedAt(Instant.now());
         exec.setDurationMs(Instant.now().toEpochMilli() - start.toEpochMilli());
         jobExecutionRepository.save(exec);
+    }
+
+    private static void deleteTempDir(Path dir) {
+        if (dir == null) return;
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder())
+                  .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
+        } catch (IOException ignored) {}
     }
 
     // -------------------------------------------------------------------------

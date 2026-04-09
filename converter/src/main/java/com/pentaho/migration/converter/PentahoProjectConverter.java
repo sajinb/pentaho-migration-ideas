@@ -3,14 +3,19 @@ package com.pentaho.migration.converter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
+import com.pentaho.migration.model.EntryDefinition;
 import com.pentaho.migration.model.JobDefinition;
 import com.pentaho.migration.model.TransformationDefinition;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -64,42 +69,72 @@ public final class PentahoProjectConverter {
      * Converts a zip file containing {@code .ktr} and {@code .kjb} files into a zip
      * of equivalent {@code .yaml} files.
      *
+     * <p>KTR files are processed first so they always get the base output name
+     * (e.g. {@code report.yaml}). KJB files are processed second; if a KJB shares a
+     * base name with a KTR the KJB output is renamed (e.g. {@code report_2.yaml}).
+     * Any {@code transformationPath} references inside KJB output YAML are
+     * automatically updated to reflect the actual assigned KTR name.
+     *
      * @param inputZip  path to the input zip
      * @param outputZip path where the converted zip will be written (created or overwritten)
      */
     public void convert(Path inputZip, Path outputZip) throws Exception {
-        try (ZipInputStream  zin  = new ZipInputStream(Files.newInputStream(inputZip));
-             ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(outputZip))) {
 
-            Set<String> usedNames = new HashSet<>();
+        // ── Pass 1: read all entries into memory, split by type ──────────────
+        Map<String, byte[]> ktrEntries = new LinkedHashMap<>();
+        Map<String, byte[]> kjbEntries = new LinkedHashMap<>();
+
+        try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(inputZip))) {
             ZipEntry entry;
             while ((entry = zin.getNextEntry()) != null) {
-                String name = entry.getName();
-                if (entry.isDirectory()) {
-                    zout.putNextEntry(new ZipEntry(name));
-                    zout.closeEntry();
-                    continue;
-                }
-
-                byte[] convertedBytes = null;
-                String outName = null;
-
-                if (name.endsWith(".ktr")) {
-                    convertedBytes = convertKtrToBytes(zin);
-                    outName = replaceExtension(name, ".yaml");
-                } else if (name.endsWith(".kjb")) {
-                    convertedBytes = convertKjbToBytes(zin);
-                    outName = replaceExtension(name, ".yaml");
-                }
-                // Skip files that are neither .ktr nor .kjb
-
-                if (convertedBytes != null) {
-                    String uniqueName = makeUnique(outName, usedNames);
-                    zout.putNextEntry(new ZipEntry(uniqueName));
-                    zout.write(convertedBytes);
-                    zout.closeEntry();
+                if (!entry.isDirectory()) {
+                    String name = entry.getName();
+                    byte[] bytes = zin.readAllBytes();
+                    if      (name.endsWith(".ktr")) ktrEntries.put(name, bytes);
+                    else if (name.endsWith(".kjb")) kjbEntries.put(name, bytes);
                 }
                 zin.closeEntry();
+            }
+        }
+
+        Set<String> usedNames = new HashSet<>();
+
+        // ── Pass 2: convert KTRs first → they own the base names ─────────────
+        // ktrRenameMap: expected yaml name → actual assigned name
+        // (identical unless there was a collision)
+        Map<String, String> ktrRenameMap = new LinkedHashMap<>();
+        Map<String, byte[]> ktrOutput    = new LinkedHashMap<>();
+
+        for (Map.Entry<String, byte[]> e : ktrEntries.entrySet()) {
+            String expected = replaceExtension(e.getKey(), ".yaml");
+            String assigned = makeUnique(expected, usedNames);
+            ktrRenameMap.put(expected, assigned);
+            ktrOutput.put(assigned,
+                    convertKtrToBytes(new ByteArrayInputStream(e.getValue())));
+        }
+
+        // ── Pass 3: convert KJBs second → remap transformationPath if renamed ─
+        Map<String, byte[]> kjbOutput = new LinkedHashMap<>();
+
+        for (Map.Entry<String, byte[]> e : kjbEntries.entrySet()) {
+            String expected = replaceExtension(e.getKey(), ".yaml");
+            String assigned = makeUnique(expected, usedNames);
+            byte[] converted = convertKjbToBytes(new ByteArrayInputStream(e.getValue()));
+            converted = remapTransformationPaths(converted, ktrRenameMap);
+            kjbOutput.put(assigned, converted);
+        }
+
+        // ── Write output zip (KTRs first, then KJBs) ─────────────────────────
+        try (ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(outputZip))) {
+            for (Map.Entry<String, byte[]> e : ktrOutput.entrySet()) {
+                zout.putNextEntry(new ZipEntry(e.getKey()));
+                zout.write(e.getValue());
+                zout.closeEntry();
+            }
+            for (Map.Entry<String, byte[]> e : kjbOutput.entrySet()) {
+                zout.putNextEntry(new ZipEntry(e.getKey()));
+                zout.write(e.getValue());
+                zout.closeEntry();
             }
         }
     }
@@ -166,5 +201,35 @@ public final class PentahoProjectConverter {
     private static String replaceExtension(String path, String newExt) {
         int dot = path.lastIndexOf('.');
         return dot < 0 ? path + newExt : path.substring(0, dot) + newExt;
+    }
+
+    /**
+     * Rewrites {@code transformationPath} values in a serialized KJB YAML according to
+     * {@code renameMap} (expected YAML name → actual assigned name).
+     * Only rewrites entries that were actually renamed (i.e. where expected ≠ assigned).
+     * Returns the original bytes unchanged if no remapping is needed.
+     */
+    private byte[] remapTransformationPaths(byte[] yamlBytes,
+                                             Map<String, String> renameMap) throws Exception {
+        // Fast path: if no renames happened, nothing to do
+        boolean anyRenamed = renameMap.entrySet().stream()
+                .anyMatch(e -> !e.getKey().equals(e.getValue()));
+        if (!anyRenamed) return yamlBytes;
+
+        JobDefinition def = yaml.readValue(yamlBytes, JobDefinition.class);
+        boolean changed = false;
+        if (def.entries != null) {
+            for (EntryDefinition entry : def.entries) {
+                if (entry.params == null) continue;
+                String tp = entry.params.get("transformationPath");
+                if (tp == null) continue;
+                String remapped = renameMap.get(tp);
+                if (remapped != null && !remapped.equals(tp)) {
+                    entry.params.put("transformationPath", remapped);
+                    changed = true;
+                }
+            }
+        }
+        return changed ? yaml.writeValueAsBytes(def) : yamlBytes;
     }
 }

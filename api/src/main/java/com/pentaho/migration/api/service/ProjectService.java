@@ -162,12 +162,6 @@ public class ProjectService {
 
             converter.convert(inputZip, outputZip);
 
-            String kjbYamlName = project.getFiles().stream()
-                    .filter(f -> f.getFileType() == FileType.KJB)
-                    .map(ProjectFile::getFilename)
-                    .findFirst().orElse("")
-                    .replaceAll("(?i)\\.kjb$", ".yaml");
-
             try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(outputZip))) {
                 ZipEntry entry;
                 while ((entry = zin.getNextEntry()) != null) {
@@ -175,12 +169,16 @@ public class ProjectService {
                     String yamlName = entry.getName();
                     String content  = new String(zin.readAllBytes(), StandardCharsets.UTF_8);
 
+                    // Detect type by content: job YAML has "entries:" but no "steps:"
+                    YamlDefinition.DefinitionType defType =
+                            (content.contains("entries:") && !content.contains("steps:"))
+                            ? YamlDefinition.DefinitionType.JOB
+                            : YamlDefinition.DefinitionType.TRANSFORMATION;
+
                     YamlDefinition yaml = new YamlDefinition();
                     yaml.setProject(project);
                     yaml.setFilename(yamlName);
-                    yaml.setDefinitionType(yamlName.equals(kjbYamlName)
-                            ? YamlDefinition.DefinitionType.JOB
-                            : YamlDefinition.DefinitionType.TRANSFORMATION);
+                    yaml.setDefinitionType(defType);
                     yaml.setContent(content);
                     project.getYamlDefinitions().add(yaml);
                     zin.closeEntry();

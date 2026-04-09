@@ -19,13 +19,15 @@ spring:
   #   JDBC_USER=migration
   #   JDBC_PASSWORD=secret
   datasource:
-    url:      ${JDBC_URL:jdbc:h2:mem:pentaho_migration;DB_CLOSE_DELAY=-1}
-    username: ${JDBC_USER:sa}
-    password: ${JDBC_PASSWORD:}
+    url:               ${JDBC_URL:jdbc:h2:mem:pentaho_migration;DB_CLOSE_DELAY=-1}
+    username:          ${JDBC_USER:sa}
+    password:          ${JDBC_PASSWORD:}
+    driver-class-name: ${JDBC_DRIVER_CLASS:org.h2.Driver}
   jpa:
     hibernate:
       ddl-auto: update
     show-sql: false
+    open-in-view: false
 
 management:
   endpoints:

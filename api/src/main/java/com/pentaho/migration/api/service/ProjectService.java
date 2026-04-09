@@ -21,7 +21,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.zip.ZipEntry;
@@ -138,8 +140,10 @@ public class ProjectService {
             outputZip = Files.createTempFile("pentaho-out-", ".zip");
 
             try (ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(inputZip))) {
+                Set<String> usedEntryNames = new HashSet<>();
                 for (ProjectFile f : project.getFiles()) {
-                    zout.putNextEntry(new ZipEntry(f.getFilename()));
+                    String entryName = uniqueZipName(f.getFilename(), usedEntryNames);
+                    zout.putNextEntry(new ZipEntry(entryName));
                     zout.write(f.getContent());
                     zout.closeEntry();
                 }
@@ -264,6 +268,18 @@ public class ProjectService {
 
     private static void safeDelete(Path p) {
         if (p != null) try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+    }
+
+    /** Returns {@code name} on first use; appends _2, _3 … when the name is already taken. */
+    private static String uniqueZipName(String name, Set<String> used) {
+        if (used.add(name)) return name;
+        int dot  = name.lastIndexOf('.');
+        String base = dot < 0 ? name : name.substring(0, dot);
+        String ext  = dot < 0 ? ""   : name.substring(dot);
+        int counter = 2;
+        String candidate;
+        do { candidate = base + "_" + counter++ + ext; } while (!used.add(candidate));
+        return candidate;
     }
 
     /** Force-initialize all lazy collections so the entity can be used outside this session. */

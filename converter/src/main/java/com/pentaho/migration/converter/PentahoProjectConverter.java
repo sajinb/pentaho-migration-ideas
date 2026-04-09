@@ -6,11 +6,12 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
 import com.pentaho.migration.model.JobDefinition;
 import com.pentaho.migration.model.TransformationDefinition;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -70,6 +71,7 @@ public final class PentahoProjectConverter {
         try (ZipInputStream  zin  = new ZipInputStream(Files.newInputStream(inputZip));
              ZipOutputStream zout = new ZipOutputStream(Files.newOutputStream(outputZip))) {
 
+            Set<String> usedNames = new HashSet<>();
             ZipEntry entry;
             while ((entry = zin.getNextEntry()) != null) {
                 String name = entry.getName();
@@ -92,8 +94,8 @@ public final class PentahoProjectConverter {
                 // Skip files that are neither .ktr nor .kjb
 
                 if (convertedBytes != null) {
-                    ZipEntry outEntry = new ZipEntry(outName);
-                    zout.putNextEntry(outEntry);
+                    String uniqueName = makeUnique(outName, usedNames);
+                    zout.putNextEntry(new ZipEntry(uniqueName));
                     zout.write(convertedBytes);
                     zout.closeEntry();
                 }
@@ -144,6 +146,21 @@ public final class PentahoProjectConverter {
             @Override public int read(byte[] b, int o, int l) throws IOException { return delegate.read(b, o, l); }
             @Override public void close() { /* intentionally no-op */ }
         };
+    }
+
+    /**
+     * Returns {@code name} if it hasn't been used yet, otherwise appends {@code _2}, {@code _3}, …
+     * until a unique name is found. Records the chosen name in {@code used}.
+     */
+    private static String makeUnique(String name, Set<String> used) {
+        if (used.add(name)) return name;
+        int dot  = name.lastIndexOf('.');
+        String base = dot < 0 ? name : name.substring(0, dot);
+        String ext  = dot < 0 ? ""   : name.substring(dot);
+        int counter = 2;
+        String candidate;
+        do { candidate = base + "_" + counter++ + ext; } while (!used.add(candidate));
+        return candidate;
     }
 
     private static String replaceExtension(String path, String newExt) {

@@ -338,6 +338,97 @@ class KtrParserTest {
     // 10. Type name normalisation
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // 9. MergeJoin — full pipeline with field schema resolution
+    // -------------------------------------------------------------------------
+
+    @Test
+    void mergeJoin_columnNamesResolvedToIndices() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>csv_join_transformation</name></info>
+              <order>
+                <hop><from>Read Customers CSV</from><to>Sort Customers</to><enabled>Y</enabled></hop>
+                <hop><from>Read Orders CSV</from><to>Sort Orders</to><enabled>Y</enabled></hop>
+                <hop><from>Sort Customers</from><to>Merge Join</to><enabled>Y</enabled></hop>
+                <hop><from>Sort Orders</from><to>Merge Join</to><enabled>Y</enabled></hop>
+              </order>
+              <step>
+                <name>Read Customers CSV</name>
+                <type>CsvInput</type>
+                <filename>/data/customers.csv</filename>
+                <separator>,</separator>
+                <header>Y</header>
+                <fields>
+                  <field><name>customer_id</name><type>Integer</type></field>
+                  <field><name>name</name><type>String</type></field>
+                </fields>
+              </step>
+              <step>
+                <name>Read Orders CSV</name>
+                <type>CsvInput</type>
+                <filename>/data/orders.csv</filename>
+                <separator>,</separator>
+                <header>Y</header>
+                <fields>
+                  <field><name>order_id</name><type>Integer</type></field>
+                  <field><name>customer_id</name><type>Integer</type></field>
+                  <field><name>amount</name><type>Number</type></field>
+                </fields>
+              </step>
+              <step>
+                <name>Sort Customers</name>
+                <type>SortRows</type>
+                <sort_fields><field><name>customer_id</name><ascending>Y</ascending></field></sort_fields>
+              </step>
+              <step>
+                <name>Sort Orders</name>
+                <type>SortRows</type>
+                <sort_fields><field><name>customer_id</name><ascending>Y</ascending></field></sort_fields>
+              </step>
+              <step>
+                <name>Merge Join</name>
+                <type>MergeJoin</type>
+                <join_type>INNER</join_type>
+                <step1>Sort Customers</step1>
+                <step2>Sort Orders</step2>
+                <keys_1><key>customer_id</key></keys_1>
+                <keys_2><key>customer_id</key></keys_2>
+              </step>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("csv_join_transformation", def.name);
+        assertEquals(5, def.steps.size());
+        assertEquals(4, def.hops.size());
+
+        // Sort Customers: customer_id is index 0 in [customer_id, name]
+        StepDefinition sortCust = def.steps.get(2);
+        assertEquals("SortRows", sortCust.type);
+        assertEquals("0", sortCust.params.get("columns"));
+
+        // Sort Orders: customer_id is index 1 in [order_id, customer_id, amount]
+        StepDefinition sortOrd = def.steps.get(3);
+        assertEquals("SortRows", sortOrd.type);
+        assertEquals("1", sortOrd.params.get("columns"));
+
+        // Merge Join: left key = index 0 (customers), right key = index 1 (orders)
+        StepDefinition join = def.steps.get(4);
+        assertEquals("MergeJoin", join.type);
+        assertEquals("INNER",          join.params.get("joinType"));
+        assertEquals("Sort Customers", join.params.get("step1"));
+        assertEquals("Sort Orders",    join.params.get("step2"));
+        assertEquals("0",              join.params.get("leftColumns"));
+        assertEquals("1",              join.params.get("rightColumns"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Type normalisation
+    // -------------------------------------------------------------------------
+
     @Test
     void typeNormalisation_knownTypes() {
         assertEquals("CsvInput",         KtrParser.normalizeType("CSVInput"));

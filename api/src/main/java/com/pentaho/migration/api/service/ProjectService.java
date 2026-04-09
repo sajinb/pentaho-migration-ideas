@@ -10,6 +10,7 @@ import com.pentaho.migration.converter.PentahoProjectConverter;
 import com.pentaho.migration.engine.JobExecutor;
 import com.pentaho.migration.model.JobDefinition;
 import jakarta.persistence.EntityNotFoundException;
+import org.hibernate.Hibernate;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -94,7 +95,9 @@ public class ProjectService {
             project.getFiles().add(ktrFile);
         }
 
-        return projectRepository.save(project);
+        project = projectRepository.save(project);
+        initCollections(project);
+        return project;
     }
 
     // -------------------------------------------------------------------------
@@ -108,8 +111,10 @@ public class ProjectService {
 
     @Transactional(readOnly = true)
     public Project getProject(UUID id) {
-        return projectRepository.findById(id)
+        Project project = projectRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("Project not found: " + id));
+        initCollections(project);
+        return project;
     }
 
     // -------------------------------------------------------------------------
@@ -177,7 +182,9 @@ public class ProjectService {
             safeDelete(outputZip);
         }
 
-        return projectRepository.save(project);
+        project = projectRepository.save(project);
+        initCollections(project);
+        return project;
     }
 
     // -------------------------------------------------------------------------
@@ -257,5 +264,12 @@ public class ProjectService {
 
     private static void safeDelete(Path p) {
         if (p != null) try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+    }
+
+    /** Force-initialize all lazy collections so the entity can be used outside this session. */
+    private static void initCollections(Project project) {
+        Hibernate.initialize(project.getFiles());
+        Hibernate.initialize(project.getYamlDefinitions());
+        Hibernate.initialize(project.getExecutions());
     }
 }

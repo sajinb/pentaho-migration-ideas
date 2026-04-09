@@ -13,6 +13,8 @@ import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -126,14 +128,96 @@ public final class KtrParser {
         Document doc = builder.parse(ktrXml);
         doc.getDocumentElement().normalize();
 
+        // Pre-compute field schemas (stepName → ordered field names) and hop topology
+        // so KtrParser can resolve column names to 0-based indices before emitting YAML.
+        Map<String, List<String>> fieldSchemas = buildFieldSchemas(doc);
+        Map<String, String>       upstreamOf   = buildUpstreamMap(doc);
+
         TransformationDefinition def = new TransformationDefinition();
         def.name  = extractName(doc);
-        def.steps = extractSteps(doc);
+        def.steps = extractSteps(doc, fieldSchemas, upstreamOf);
         def.hops  = extractHops(doc);
         return def;
     }
 
     // -------------------------------------------------------------------------
+
+    /**
+     * Builds a map of stepName → ordered field names by scanning every step's
+     * {@code <fields>/<field>/<name>} declarations.
+     */
+    private static Map<String, List<String>> buildFieldSchemas(Document doc) {
+        Map<String, List<String>> schemas = new LinkedHashMap<>();
+        NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
+        for (int i = 0; i < stepNodes.getLength(); i++) {
+            Element el = (Element) stepNodes.item(i);
+            if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
+            String stepName = text(el, "name");
+            if (stepName == null) continue;
+            List<String> names = new ArrayList<>();
+            NodeList fieldsEls = el.getElementsByTagName("fields");
+            if (fieldsEls.getLength() > 0) {
+                Element fields = (Element) fieldsEls.item(0);
+                NodeList fieldEls = fields.getElementsByTagName("field");
+                for (int j = 0; j < fieldEls.getLength(); j++) {
+                    String fname = text((Element) fieldEls.item(j), "name");
+                    if (fname != null && !fname.isBlank()) names.add(fname);
+                }
+            }
+            if (!names.isEmpty()) schemas.put(stepName, names);
+        }
+        return schemas;
+    }
+
+    /**
+     * Builds a map of stepName → first upstream step name by scanning {@code <hop>} elements.
+     * Used to walk the pipeline backward when resolving column names.
+     */
+    private static Map<String, String> buildUpstreamMap(Document doc) {
+        Map<String, String> upstream = new HashMap<>();
+        NodeList hopNodes = doc.getElementsByTagName("hop");
+        for (int i = 0; i < hopNodes.getLength(); i++) {
+            Element el = (Element) hopNodes.item(i);
+            String from = text(el, "from");
+            String to   = text(el, "to");
+            if (from != null && to != null) upstream.putIfAbsent(to, from);
+        }
+        return upstream;
+    }
+
+    /**
+     * Resolves a column name in {@code params} to a 0-based index by walking
+     * upstream in the hop graph until a step with a known field schema is found.
+     */
+    private static void resolveColumnName(Map<String, String> params, String stepName,
+                                          Map<String, String> upstreamOf,
+                                          Map<String, List<String>> fieldSchemas) {
+        String col = params.get("column");
+        if (col == null || isInteger(col)) return; // already numeric or absent
+        List<String> schema = findUpstreamSchema(stepName, upstreamOf, fieldSchemas);
+        if (schema == null) return;
+        int idx = schema.indexOf(col);
+        if (idx >= 0) params.put("column", String.valueOf(idx));
+        // else: leave the name as-is; step will default to 0 with a warning
+    }
+
+    private static List<String> findUpstreamSchema(String stepName,
+                                                    Map<String, String> upstreamOf,
+                                                    Map<String, List<String>> fieldSchemas) {
+        String current = stepName;
+        for (int depth = 0; depth < 20; depth++) {
+            String up = upstreamOf.get(current);
+            if (up == null) return null;
+            List<String> schema = fieldSchemas.get(up);
+            if (schema != null) return schema;
+            current = up;
+        }
+        return null;
+    }
+
+    private static boolean isInteger(String s) {
+        try { Integer.parseInt(s); return true; } catch (NumberFormatException e) { return false; }
+    }
 
     private String extractName(Document doc) {
         NodeList infoNodes = doc.getElementsByTagName("info");
@@ -149,7 +233,9 @@ public final class KtrParser {
         return names.getLength() > 0 ? names.item(0).getTextContent().trim() : "unnamed";
     }
 
-    private List<StepDefinition> extractSteps(Document doc) {
+    private List<StepDefinition> extractSteps(Document doc,
+                                               Map<String, List<String>> fieldSchemas,
+                                               Map<String, String> upstreamOf) {
         List<StepDefinition> steps = new ArrayList<>();
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         for (int i = 0; i < stepNodes.getLength(); i++) {
@@ -163,6 +249,11 @@ public final class KtrParser {
 
             StepXmlMapper mapper = mapperRegistry.get(sd.type);
             sd.params = mapper.map(el);
+
+            // Resolve column names to 0-based indices for steps that reference field names.
+            if ("FilterRows".equals(sd.type) || "SortRows".equals(sd.type)) {
+                resolveColumnName(sd.params, sd.id, upstreamOf, fieldSchemas);
+            }
 
             steps.add(sd);
         }

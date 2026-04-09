@@ -11,25 +11,31 @@ import java.util.*;
  *
  * <p>Params:
  * <ul>
- *   <li>{@code column}     — 0-based column index to test
- *   <li>{@code value}      — value to compare against (equality)
- *   <li>{@code trueStep}   — downstream step ID for matching rows (required)
- *   <li>{@code falseStep}  — downstream step ID for non-matching rows (required)
+ *   <li>{@code column}    — 0-based column index to test (resolved from name by KtrParser)</li>
+ *   <li>{@code operator}  — comparison operator: EQ (default), NEQ, GT, LT, GTE, LTE, CONTAINS</li>
+ *   <li>{@code value}     — value to compare against</li>
+ *   <li>{@code trueStep}  — downstream step ID for matching rows</li>
+ *   <li>{@code falseStep} — downstream step ID for non-matching rows</li>
  * </ul>
- *
- * <p>The route() method materializes both lists in memory. For large datasets,
- * consider splitting into two separate source paths with BroadcastBuffer instead.
  */
 public class FilterRowsStep implements RoutingStep {
 
     private int    column;
+    private String operator;
     private String value;
     private String trueStep;
     private String falseStep;
 
     @Override
     public void configure(Map<String, String> params) {
-        column    = Integer.parseInt(params.getOrDefault("column", "0"));
+        String col = params.getOrDefault("column", "0");
+        try {
+            column = Integer.parseInt(col);
+        } catch (NumberFormatException e) {
+            // Column name was not resolved to an index by the parser — default to 0
+            column = 0;
+        }
+        operator  = params.getOrDefault("operator", "EQ").toUpperCase();
         value     = params.get("value");
         trueStep  = params.get("trueStep");
         falseStep = params.get("falseStep");
@@ -42,15 +48,38 @@ public class FilterRowsStep implements RoutingStep {
 
         Iterator<Row> upstream = inputs.get(0);
         while (upstream.hasNext()) {
-            Row    row     = upstream.next();
+            Row    row      = upstream.next();
             String fieldVal = column < row.fieldCount() ? row.getString(column) : null;
-            boolean matches = Objects.equals(fieldVal, value);
-            (matches ? trueRows : falseRows).add(row);
+            (evaluate(fieldVal) ? trueRows : falseRows).add(row);
         }
 
         Map<String, Iterator<Row>> routes = new HashMap<>();
         if (trueStep  != null) routes.put(trueStep,  trueRows.iterator());
         if (falseStep != null) routes.put(falseStep, falseRows.iterator());
         return routes;
+    }
+
+    private boolean evaluate(String fieldVal) {
+        if (fieldVal == null) return false;
+        return switch (operator) {
+            case "NEQ", "NOT_EQUAL", "NE" -> !Objects.equals(fieldVal, value);
+            case "GT"                      -> compareNumOrStr(fieldVal, value) > 0;
+            case "LT"                      -> compareNumOrStr(fieldVal, value) < 0;
+            case "GTE", "GE", "GREATER_EQUAL" -> compareNumOrStr(fieldVal, value) >= 0;
+            case "LTE", "LE", "LESS_EQUAL"    -> compareNumOrStr(fieldVal, value) <= 0;
+            case "CONTAINS"                -> fieldVal.contains(value != null ? value : "");
+            case "STARTS_WITH"             -> fieldVal.startsWith(value != null ? value : "");
+            case "ENDS_WITH"               -> fieldVal.endsWith(value != null ? value : "");
+            default /* EQ, EQUAL */        -> Objects.equals(fieldVal, value);
+        };
+    }
+
+    /** Numeric comparison when both sides parse as doubles; string comparison otherwise. */
+    private static int compareNumOrStr(String a, String b) {
+        try {
+            return Double.compare(Double.parseDouble(a), Double.parseDouble(b != null ? b : "0"));
+        } catch (NumberFormatException e) {
+            return a.compareTo(b != null ? b : "");
+        }
     }
 }

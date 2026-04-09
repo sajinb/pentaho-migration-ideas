@@ -193,7 +193,94 @@ class KtrParserTest {
     }
 
     // -------------------------------------------------------------------------
-    // 6. Unknown step type — uses default mapper (copies leaf text elements)
+    // 6. FilterRows — new <condition> format with operator and value
+    // -------------------------------------------------------------------------
+
+    @Test
+    void filterRows_conditionFormat_operatorAndValueExtracted() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>t</name></info>
+              <step>
+                <name>filter</name>
+                <type>FilterRows</type>
+                <condition>
+                  <leftvalue><name>age</name></leftvalue>
+                  <function>GT</function>
+                  <rightvalue><value>18</value></rightvalue>
+                </condition>
+              </step>
+              <order/>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+        StepDefinition sd = def.steps.get(0);
+
+        assertEquals("FilterRows", sd.type);
+        // Column name left as "age" — no upstream step with field schema in this KTR
+        assertEquals("age",  sd.params.get("column"));
+        assertEquals("GT",   sd.params.get("operator"));
+        assertEquals("18",   sd.params.get("value"));
+    }
+
+    @Test
+    void filterRows_columnNameResolvedToIndex_viaUpstreamFields() throws Exception {
+        // Full pipeline: TextFileInput (with <fields>) → FilterRows
+        // KtrParser should resolve "age" → "2" (0-based: id=0, name=1, age=2, city=3)
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>t</name></info>
+              <step>
+                <name>Read CSV</name>
+                <type>TextFileInput</type>
+                <file><name>C:/data/in.csv</name></file>
+                <header>Y</header>
+                <separator>,</separator>
+                <fields>
+                  <field><name>id</name><type>Integer</type></field>
+                  <field><name>name</name><type>String</type></field>
+                  <field><name>age</name><type>Integer</type></field>
+                  <field><name>city</name><type>String</type></field>
+                </fields>
+              </step>
+              <step>
+                <name>Filter Rows</name>
+                <type>FilterRows</type>
+                <condition>
+                  <leftvalue><name>age</name></leftvalue>
+                  <function>GT</function>
+                  <rightvalue><value>18</value></rightvalue>
+                </condition>
+              </step>
+              <step>
+                <name>Write CSV</name>
+                <type>TextFileOutput</type>
+                <file><name>C:/data/out.csv</name></file>
+              </step>
+              <hop><from>Read CSV</from><to>Filter Rows</to><enabled>Y</enabled></hop>
+              <hop><from>Filter Rows</from><to>Write CSV</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        // TextFileInput should carry fieldNames + fieldTypes
+        StepDefinition src = def.steps.get(0);
+        assertEquals("id,name,age,city",                src.params.get("fieldNames"));
+        assertEquals("Integer,String,Integer,String",   src.params.get("fieldTypes"));
+
+        // FilterRows column "age" resolved to index 2
+        StepDefinition filter = def.steps.get(1);
+        assertEquals("2",   filter.params.get("column"));   // 0-based index of "age"
+        assertEquals("GT",  filter.params.get("operator"));
+        assertEquals("18",  filter.params.get("value"));
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. Unknown step type — uses default mapper (copies leaf text elements)
     // -------------------------------------------------------------------------
 
     @Test
@@ -221,7 +308,7 @@ class KtrParserTest {
     }
 
     // -------------------------------------------------------------------------
-    // 7. Hop enabled=N → disabled
+    // 9. Hop enabled=N → disabled
     // -------------------------------------------------------------------------
 
     @Test
@@ -246,7 +333,7 @@ class KtrParserTest {
     }
 
     // -------------------------------------------------------------------------
-    // 8. Type name normalisation
+    // 10. Type name normalisation
     // -------------------------------------------------------------------------
 
     @Test

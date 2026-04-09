@@ -111,6 +111,11 @@ public final class KjbParser {
             case "EXEC_PROCESS"    -> "ExecProcess";
             case "FILE_EXISTS"     -> "FileExists";
             case "DUMMY"           -> "Dummy";
+            // These three can appear either as SPECIAL sub-types (handled in resolveEntryType)
+            // or directly as top-level type values in non-standard KJBs.
+            case "SUCCESS"         -> "Success";
+            case "ABORT"           -> "Abort";
+            case "START"           -> "Start";
             default                -> type;
         };
     }

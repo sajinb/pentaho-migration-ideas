@@ -210,4 +210,58 @@ class KjbParserTest {
 
         assertTrue(parse(kjb).hops.isEmpty(), "Disabled hops should be excluded");
     }
+
+    // -------------------------------------------------------------------------
+    // SUCCESS type used directly (non-SPECIAL) — regression for KJB format
+    // -------------------------------------------------------------------------
+
+    @Test
+    void successTypeDirectly_normalised() throws Exception {
+        // Pentaho standard uses <type>SPECIAL</type><success>Y</success>, but some KJBs
+        // emit <type>SUCCESS</type> directly. Both must map to "Success".
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>main_job</name>
+              <entries>
+                <entry>
+                  <name>START</name>
+                  <type>SPECIAL</type>
+                  <start>Y</start>
+                </entry>
+                <entry>
+                  <name>Execute Join Transformation</name>
+                  <type>TRANS</type>
+                  <filename>${Internal.Entry.Current.Directory}/process_data.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Success</name>
+                  <type>SUCCESS</type>
+                </entry>
+              </entries>
+              <hops>
+                <hop><from>START</from><to>Execute Join Transformation</to><enabled>Y</enabled></hop>
+                <hop><from>Execute Join Transformation</from><to>Success</to><enabled>Y</enabled></hop>
+              </hops>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("main_job", def.name);
+        assertEquals(3, def.entries.size());
+        assertEquals(2, def.hops.size());
+
+        assertEquals("Start",             def.entries.get(0).type);
+        assertEquals("RunTransformation", def.entries.get(1).type);
+        // .ktr extension converted to .yaml
+        assertEquals("${Internal.Entry.Current.Directory}/process_data.yaml",
+                     def.entries.get(1).params.get("transformationPath"));
+        // <type>SUCCESS</type> must normalise to "Success" (not "SUCCESS")
+        assertEquals("Success",           def.entries.get(2).type);
+
+        // Hops with no <evaluation>/<unconditional> default to "success"
+        assertEquals("success", def.hops.get(0).evaluation);
+        assertEquals("success", def.hops.get(1).evaluation);
+    }
 }

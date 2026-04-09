@@ -108,7 +108,9 @@ public class ProjectService {
 
     @Transactional(readOnly = true)
     public List<Project> listProjects() {
-        return projectRepository.findAllOrderByCreatedAtDesc();
+        List<Project> projects = projectRepository.findAllOrderByCreatedAtDesc();
+        projects.forEach(ProjectService::initCollections);
+        return projects;
     }
 
     @Transactional(readOnly = true)

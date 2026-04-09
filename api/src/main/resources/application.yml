@@ -33,6 +33,14 @@ spring:
     show-sql: false
     open-in-view: false
 
+logging:
+  file:
+    name: ${LOG_FILE:logs/pentaho-migration.log}
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  level:
+    com.pentaho.migration: INFO
+
 management:
   endpoints:
     web:

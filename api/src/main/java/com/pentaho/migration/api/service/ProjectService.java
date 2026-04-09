@@ -11,9 +11,13 @@ import com.pentaho.migration.engine.JobExecutor;
 import com.pentaho.migration.model.JobDefinition;
 import jakarta.persistence.EntityNotFoundException;
 import org.hibernate.Hibernate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
@@ -35,6 +39,8 @@ import java.util.zip.ZipOutputStream;
 
 @Service
 public class ProjectService {
+
+    private static final Logger log = LoggerFactory.getLogger(ProjectService.class);
 
     private final ProjectRepository       projectRepository;
     private final JobExecutionRepository  jobExecutionRepository;
@@ -233,12 +239,23 @@ public class ProjectService {
         execution = jobExecutionRepository.save(execution);
 
         final UUID execId = execution.getId();
-        executionPool.submit(() -> runJobAsync(execId, jobDef, yamlContents));
+
+        // Submit AFTER the transaction commits so the PENDING row is visible to the
+        // async thread when it calls findById(execId). Without this the thread races
+        // the commit, findById returns empty, orElseThrow() throws silently, and the
+        // execution is stuck in PENDING forever.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                executionPool.submit(() -> runJobAsync(execId, jobDef, yamlContents));
+            }
+        });
 
         return execution;
     }
 
     private void runJobAsync(UUID execId, JobDefinition jobDef, Map<String, String> yamlContents) {
+        log.info("[exec:{}] Starting job '{}'", execId, jobDef.name);
         JobExecution exec = jobExecutionRepository.findById(execId).orElseThrow();
         exec.setStatus(ExecutionStatus.RUNNING);
         exec.setStartedAt(Instant.now());
@@ -250,6 +267,7 @@ public class ProjectService {
             // Write every YAML definition to a temp directory so RunTransformationEntry
             // can read them by filename (transformationPath is the bare filename).
             yamlDir = Files.createTempDirectory("pentaho-exec-");
+            log.info("[exec:{}] Writing {} YAML file(s) to {}", execId, yamlContents.size(), yamlDir);
             for (Map.Entry<String, String> e : yamlContents.entrySet()) {
                 Files.writeString(yamlDir.resolve(e.getKey()), e.getValue());
             }
@@ -260,12 +278,18 @@ public class ProjectService {
             boolean success = jobExecutor.execute(jobDef, context);
             exec = jobExecutionRepository.findById(execId).orElseThrow();
             exec.setStatus(success ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED);
-            if (!success) exec.setErrorMessage("Job returned failure");
+            if (!success) {
+                exec.setErrorMessage("Job returned failure");
+                log.warn("[exec:{}] Job '{}' completed with failure result", execId, jobDef.name);
+            } else {
+                log.info("[exec:{}] Job '{}' completed successfully", execId, jobDef.name);
+            }
         } catch (Exception e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            log.error("[exec:{}] Job '{}' threw exception: {}", execId, jobDef.name, msg, e);
             exec = jobExecutionRepository.findById(execId).orElseThrow();
             exec.setStatus(ExecutionStatus.FAILED);
-            exec.setErrorMessage(e.getMessage() != null ? e.getMessage()
-                    : e.getClass().getSimpleName());
+            exec.setErrorMessage(msg);
         } finally {
             deleteTempDir(yamlDir);
         }

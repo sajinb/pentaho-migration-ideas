@@ -277,7 +277,9 @@ public final class KtrParser {
                 // Inject trueStep/falseStep from hop topology when absent from step XML.
                 injectFilterRouting(sd.params, sd.id, downstreamOf);
             } else if ("SortRows".equals(sd.type)) {
-                resolveColumnName(sd.params, sd.id, upstreamOf, fieldSchemas);
+                resolveColumnNames(sd.params, "columns", sd.id, upstreamOf, fieldSchemas);
+            } else if ("MergeJoin".equals(sd.type)) {
+                resolveMergeJoinColumns(sd.params, upstreamOf, fieldSchemas);
             }
 
             steps.add(sd);
@@ -299,6 +301,65 @@ public final class KtrParser {
         List<String> targets = downstreamOf.getOrDefault(stepId, List.of());
         if (!targets.isEmpty()) params.put("trueStep",  targets.get(0));
         if (targets.size() >= 2) params.put("falseStep", targets.get(1));
+    }
+
+    /**
+     * Resolves comma-separated column names in {@code paramKey} to 0-based indices by
+     * walking upstream from {@code stepName}. Tokens that are already integers are kept.
+     * Tokens that cannot be resolved are left as-is (step will give a clear error at runtime).
+     */
+    private static void resolveColumnNames(Map<String, String> params, String paramKey,
+                                            String stepName,
+                                            Map<String, String> upstreamOf,
+                                            Map<String, List<String>> fieldSchemas) {
+        String raw = params.get(paramKey);
+        if (raw == null || raw.isBlank()) return;
+        List<String> schema = findUpstreamSchema(stepName, upstreamOf, fieldSchemas);
+        if (schema == null) return; // can't resolve — leave names; step will error
+        String[] tokens = raw.split(",");
+        boolean changed = false;
+        for (int i = 0; i < tokens.length; i++) {
+            String t = tokens[i].trim();
+            if (!isInteger(t)) {
+                int idx = schema.indexOf(t);
+                if (idx >= 0) { tokens[i] = String.valueOf(idx); changed = true; }
+            }
+        }
+        if (changed) params.put(paramKey, String.join(",", tokens));
+    }
+
+    /**
+     * Resolves MergeJoin key column names to 0-based indices.
+     * Left keys are resolved against the schema of {@code step1}; right keys against {@code step2}.
+     * Writes {@code leftColumns} / {@code rightColumns} into params when resolution succeeds.
+     */
+    private static void resolveMergeJoinColumns(Map<String, String> params,
+                                                 Map<String, String> upstreamOf,
+                                                 Map<String, List<String>> fieldSchemas) {
+        resolveJoinSide(params, "leftKeys",  "leftColumns",  params.get("step1"), upstreamOf, fieldSchemas);
+        resolveJoinSide(params, "rightKeys", "rightColumns", params.get("step2"), upstreamOf, fieldSchemas);
+    }
+
+    private static void resolveJoinSide(Map<String, String> params,
+                                         String keysParam, String colsParam, String stepName,
+                                         Map<String, String> upstreamOf,
+                                         Map<String, List<String>> fieldSchemas) {
+        String keys = params.get(keysParam);
+        if (keys == null || keys.isBlank() || stepName == null) return;
+
+        // Schema may be on the named step itself, or on its upstream source step.
+        List<String> schema = fieldSchemas.get(stepName);
+        if (schema == null) schema = findUpstreamSchema(stepName, upstreamOf, fieldSchemas);
+        if (schema == null) return; // leave as names; MergeJoinStep will error
+
+        String[] names = keys.split(",");
+        String[] indices = new String[names.length];
+        for (int i = 0; i < names.length; i++) {
+            String name = names[i].trim();
+            int idx = isInteger(name) ? Integer.parseInt(name) : schema.indexOf(name);
+            indices[i] = String.valueOf(Math.max(idx, 0));
+        }
+        params.put(colsParam, String.join(",", indices));
     }
 
     private List<HopDefinition> extractHops(Document doc) {

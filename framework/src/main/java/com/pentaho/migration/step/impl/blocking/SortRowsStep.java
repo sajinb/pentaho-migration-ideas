@@ -40,7 +40,18 @@ public class SortRowsStep implements Step {
         ascending = new boolean[colParts.length];
         Arrays.fill(ascending, true);
 
-        for (int i = 0; i < colParts.length; i++) columns[i] = Integer.parseInt(colParts[i].trim());
+        for (int i = 0; i < colParts.length; i++) {
+            String token = colParts[i].trim();
+            try {
+                columns[i] = Integer.parseInt(token);
+            } catch (NumberFormatException ex) {
+                throw new IllegalArgumentException(
+                    "SortRows: column '" + token + "' is not a 0-based integer index. " +
+                    "Add a <fields> section to the upstream CsvInput/TextFileInput step in " +
+                    "your KTR so the converter can resolve column names to numeric indices, " +
+                    "then re-convert.");
+            }
+        }
 
         if (params.containsKey("ascending")) {
             String[] ascParts = params.get("ascending").split(",");

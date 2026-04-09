@@ -32,11 +32,17 @@ public class MergeJoinStep implements Step {
         leftCols  = parseIntArray(params.get("leftColumns"));
         rightCols = parseIntArray(params.get("rightColumns"));
         joinType  = params.getOrDefault("joinType", "INNER").toUpperCase();
+        if (leftCols.length == 0 || rightCols.length == 0) {
+            throw new IllegalArgumentException(
+                "MergeJoin: leftColumns/rightColumns are missing or not resolved to numeric indices. " +
+                "Add a <fields> section to the upstream CsvInput/TextFileInput steps in your KTR " +
+                "so the converter can resolve key column names to 0-based indices, then re-convert.");
+        }
     }
 
     @Override
     public Iterator<Row> apply(List<Iterator<Row>> inputs) {
-        // Materialize both sides (required for FULL OUTER; acceptable for Phase 1)
+        // Materialize both sides (required for FULL OUTER; acceptable for sorted-merge join)
         List<Row> left  = drain(inputs.get(0));
         List<Row> right = inputs.size() > 1 ? drain(inputs.get(1)) : List.of();
 
@@ -46,22 +52,17 @@ public class MergeJoinStep implements Step {
         while (li < left.size() && ri < right.size()) {
             int cmp = compareKeys(left.get(li), right.get(ri));
             if (cmp == 0) {
-                // Collect all matching right rows for this left key
+                // Advance right past all rows matching the current left key.
                 int rStart = ri;
                 while (ri < right.size() && compareKeys(left.get(li), right.get(ri)) == 0) ri++;
+                // Cross-product of all left rows sharing this key × all matching right rows.
                 for (int lj = li; lj < left.size() && compareKeys(left.get(lj), left.get(li)) == 0; lj++) {
                     for (int rj = rStart; rj < ri; rj++) {
                         result.add(merge(left.get(lj), right.get(rj)));
                     }
                 }
-                while (li < left.size() && compareKeys(left.get(li), left.get(li > 0 ? li-1 : 0)) == 0 && li > 0) li++;
-                if (li < left.size() && compareKeys(left.get(li), right.get(rStart)) == 0) {
-                    // already advanced
-                } else {
-                    // advance li to next unmatched
-                }
-                // Simpler: advance li past all rows with same key as left.get(li)
-                String[] matchKey = getKey(left.get(li < left.size() ? li : li-1), leftCols);
+                // Advance left past all rows sharing the same key.
+                String[] matchKey = getKey(left.get(li), leftCols);
                 while (li < left.size() && Arrays.equals(getKey(left.get(li), leftCols), matchKey)) li++;
             } else if (cmp < 0) {
                 if (!joinType.equals("INNER") && !joinType.equals("RIGHT OUTER"))
@@ -73,6 +74,7 @@ public class MergeJoinStep implements Step {
                 ri++;
             }
         }
+        // Trailing unmatched rows for OUTER joins.
         if (!joinType.equals("INNER") && !joinType.equals("RIGHT OUTER"))
             while (li < left.size())  { result.add(merge(left.get(li++),  null)); }
         if (!joinType.equals("INNER") && !joinType.equals("LEFT OUTER"))

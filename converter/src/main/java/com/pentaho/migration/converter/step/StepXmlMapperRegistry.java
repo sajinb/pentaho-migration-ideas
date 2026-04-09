@@ -34,6 +34,7 @@ public final class StepXmlMapperRegistry {
         r.register("TableInput",          new TableInputMapper());
         r.register("ExcelInput",          new ExcelInputMapper());
         r.register("ExcelOutput",         new ExcelOutputMapper());
+        r.register("MergeJoin",           new MergeJoinMapper());
         return r;
     }
 }

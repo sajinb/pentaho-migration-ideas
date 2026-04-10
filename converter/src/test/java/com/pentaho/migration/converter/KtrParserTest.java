@@ -444,4 +444,141 @@ class KtrParserTest {
         assertEquals("SomeCustomStep",   KtrParser.normalizeType("SomeCustomStep"));
         assertEquals("Unknown",          KtrParser.normalizeType(null));
     }
+
+    // -------------------------------------------------------------------------
+    // Multi-source + conditional + MergeJoin without step1/step2
+    // -------------------------------------------------------------------------
+
+    @Test
+    void multiSourceConditionalKtr_parsedCorrectly() throws Exception {
+        // This exercises:
+        //  - CsvInput with <file><name> format (not <filename>)
+        //  - MergeJoin with <key_fields1>/<key><name> format and NO <step1>/<step2>
+        //  - UniqueRows → Unique type mapping
+        //  - FilterRows with <condition><condition> nesting + => operator + <true_step>/<false_step>
+        //  - ModifiedJavaScriptValue → ScriptValueMod mapping
+        //  - Hops as direct root children (no <order> wrapper)
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation xmlns="http://www.pentaho.com/kettle/transformation/">
+              <info><name>Complex_CSV_MultiSource_Conditional</name></info>
+              <step>
+                <name>CSV Input A</name><type>CsvInput</type>
+                <file><name>/path/users.csv</name></file>
+                <content><header>Y</header><separator>,</separator></content>
+                <fields>
+                  <field><name>user_id</name></field>
+                  <field><name>email</name></field>
+                  <field><name>country</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>CSV Input B</name><type>CsvInput</type>
+                <file><name>/path/transactions.csv</name></file>
+                <content><header>Y</header><separator>,</separator></content>
+                <fields>
+                  <field><name>transaction_id</name></field>
+                  <field><name>user_id</name></field>
+                  <field><name>amount</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>CSV Input C</name><type>CsvInput</type>
+                <file><name>/path/blacklisted.csv</name></file>
+                <content><header>Y</header></content>
+                <fields>
+                  <field><name>blacklisted_email</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Filter High Transactions</name><type>FilterRows</type>
+                <condition>
+                  <condition>
+                    <leftvalue>amount</leftvalue>
+                    <function>=&gt;</function>
+                    <rightvalue>100</rightvalue>
+                  </condition>
+                </condition>
+                <true_step>Join Users and Transactions</true_step>
+                <false_step>Discard Low Transactions</false_step>
+              </step>
+              <step><name>Discard Low Transactions</name><type>Dummy</type></step>
+              <step>
+                <name>Join Users and Transactions</name><type>MergeJoin</type>
+                <join_type>INNER</join_type>
+                <key_fields1><key><name>user_id</name></key></key_fields1>
+                <key_fields2><key><name>user_id</name></key></key_fields2>
+              </step>
+              <step><name>Remove Duplicate Emails</name><type>UniqueRows</type></step>
+              <step>
+                <name>Tag User Country</name><type>ModifiedJavaScriptValue</type>
+                <script><![CDATA[var tag = (country == "USA") ? "Domestic" : "International";]]></script>
+                <fields>
+                  <field><name>tag</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Merge User-Blacklist</name><type>MergeJoin</type>
+                <join_type>LEFT OUTER</join_type>
+                <key_fields1><key><name>email</name></key></key_fields1>
+                <key_fields2><key><name>blacklisted_email</name></key></key_fields2>
+              </step>
+              <step>
+                <name>Clean Users Output</name><type>TextFileOutput</type>
+                <file><name>/path/clean.csv</name></file>
+              </step>
+              <hop><from>CSV Input B</from><to>Filter High Transactions</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Transactions</from><to>Join Users and Transactions</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Transactions</from><to>Discard Low Transactions</to><enabled>Y</enabled></hop>
+              <hop><from>CSV Input A</from><to>Join Users and Transactions</to><enabled>Y</enabled></hop>
+              <hop><from>Join Users and Transactions</from><to>Remove Duplicate Emails</to><enabled>Y</enabled></hop>
+              <hop><from>Remove Duplicate Emails</from><to>Tag User Country</to><enabled>Y</enabled></hop>
+              <hop><from>Tag User Country</from><to>Merge User-Blacklist</to><enabled>Y</enabled></hop>
+              <hop><from>CSV Input C</from><to>Merge User-Blacklist</to><enabled>Y</enabled></hop>
+              <hop><from>Merge User-Blacklist</from><to>Clean Users Output</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("Complex_CSV_MultiSource_Conditional", def.name);
+        assertEquals(10, def.steps.size());
+        assertEquals(9,  def.hops.size());
+
+        // CsvInput <file><name> format → filePath extracted correctly
+        StepDefinition csvA = def.steps.stream().filter(s -> "CSV Input A".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("CsvInput", csvA.type);
+        assertEquals("/path/users.csv", csvA.params.get("filePath"));
+        assertEquals("true", csvA.params.get("hasHeader"));
+
+        // UniqueRows → normalized to Unique
+        StepDefinition unique = def.steps.stream().filter(s -> "Remove Duplicate Emails".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("Unique", unique.type);
+
+        // ScriptValueMod mapped from ModifiedJavaScriptValue
+        StepDefinition js = def.steps.stream().filter(s -> "Tag User Country".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("ScriptValueMod", js.type);
+        assertNotNull(js.params.get("script"), "script param should be extracted from <script> CDATA");
+        assertEquals("tag", js.params.get("outputFields"));
+
+        // FilterRows: operator normalized, routing targets extracted
+        StepDefinition filter = def.steps.stream().filter(s -> "Filter High Transactions".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("FilterRows", filter.type);
+        assertEquals("GTE",                           filter.params.get("operator"));
+        assertEquals("100",                           filter.params.get("value"));
+        assertEquals("Join Users and Transactions",   filter.params.get("trueStep"));
+        assertEquals("Discard Low Transactions",      filter.params.get("falseStep"));
+
+        // MergeJoin key_fields1/key_fields2 format with inferred step1/step2
+        StepDefinition join = def.steps.stream().filter(s -> "Join Users and Transactions".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("MergeJoin", join.type);
+        assertNotNull(join.params.get("step1"), "step1 should be inferred from hop topology");
+        assertNotNull(join.params.get("step2"), "step2 should be inferred from hop topology");
+        assertNotNull(join.params.get("leftColumns"),  "left key columns should be resolved");
+        assertNotNull(join.params.get("rightColumns"), "right key columns should be resolved");
+
+        // Second MergeJoin: LEFT OUTER join, different keys per side
+        StepDefinition blacklistJoin = def.steps.stream().filter(s -> "Merge User-Blacklist".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("LEFT OUTER", blacklistJoin.params.get("joinType"));
+    }
 }

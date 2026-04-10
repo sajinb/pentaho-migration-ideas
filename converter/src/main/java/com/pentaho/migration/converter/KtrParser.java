@@ -87,6 +87,7 @@ public final class KtrParser {
             Map.entry("GroupBy",               "GroupBy"),
             Map.entry("MemoryGroupBy",         "MemoryGroupBy"),
             Map.entry("Unique",                "Unique"),
+            Map.entry("UniqueRows",            "Unique"),
             Map.entry("UniqueRowsByHashSet",   "UniqueRowsByHashSet"),
             Map.entry("BlockingStep",          "BlockingStep"),
             Map.entry("Denormaliser",          "Denormaliser"),
@@ -133,17 +134,19 @@ public final class KtrParser {
 
         // Pre-compute field schemas (stepName → ordered field names) and hop topology
         // so KtrParser can resolve column names to 0-based indices before emitting YAML.
-        Map<String, List<String>> fieldSchemas  = buildFieldSchemas(doc);
-        Map<String, String>       upstreamOf    = buildUpstreamMap(doc);
-        Map<String, List<String>> downstreamOf  = buildDownstreamMap(doc);
+        Map<String, List<String>> fieldSchemas    = buildFieldSchemas(doc);
+        Map<String, String>       upstreamOf      = buildUpstreamMap(doc);
+        Map<String, List<String>> downstreamOf    = buildDownstreamMap(doc);
+        // All upstreams per step (used to infer MergeJoin step1/step2 when absent from XML)
+        Map<String, List<String>> allUpstreamsOf  = buildAllUpstreamsMap(doc);
 
         // Propagate schemas through intermediate steps (SortRows pass-through,
         // GroupBy → [groupKeys+aggNames], MergeJoin → [left+right], Formula → [in+newField]).
-        propagateSchemas(doc, fieldSchemas, upstreamOf);
+        propagateSchemas(doc, fieldSchemas, upstreamOf, allUpstreamsOf);
 
         TransformationDefinition def = new TransformationDefinition();
         def.name  = extractName(doc);
-        def.steps = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf);
+        def.steps = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf);
         def.hops  = extractHops(doc);
         return def;
     }
@@ -229,6 +232,26 @@ public final class KtrParser {
     }
 
     /**
+     * Builds a map of stepName → ALL upstream step names (in hop-document order).
+     * Unlike {@link #buildUpstreamMap} (which keeps only the first), this captures
+     * all inputs — necessary for MergeJoin (two inputs) when step1/step2 are absent from XML.
+     */
+    private static Map<String, List<String>> buildAllUpstreamsMap(Document doc) {
+        Map<String, List<String>> allUpstreams = new LinkedHashMap<>();
+        NodeList hopNodes = doc.getElementsByTagName("hop");
+        for (int i = 0; i < hopNodes.getLength(); i++) {
+            Element el = (Element) hopNodes.item(i);
+            String from    = text(el, "from");
+            String to      = text(el, "to");
+            String enabled = text(el, "enabled");
+            if (from != null && to != null && !"N".equalsIgnoreCase(enabled)) {
+                allUpstreams.computeIfAbsent(to, k -> new ArrayList<>()).add(from);
+            }
+        }
+        return allUpstreams;
+    }
+
+    /**
      * Propagates field schemas through intermediate steps in up to N passes
      * (handles non-topological document order).
      *
@@ -242,7 +265,8 @@ public final class KtrParser {
      */
     private static void propagateSchemas(Document doc,
                                           Map<String, List<String>> fieldSchemas,
-                                          Map<String, String> upstreamOf) {
+                                          Map<String, String> upstreamOf,
+                                          Map<String, List<String>> allUpstreamsOf) {
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         boolean changed = true;
         for (int pass = 0; pass < 15 && changed; pass++) {
@@ -255,7 +279,8 @@ public final class KtrParser {
                 if (stepName == null || fieldSchemas.containsKey(stepName)) continue;
 
                 List<String> schema = computeStepOutputSchema(el, stepName, stepType,
-                                                               fieldSchemas, upstreamOf);
+                                                               fieldSchemas, upstreamOf,
+                                                               allUpstreamsOf);
                 if (schema != null) {
                     fieldSchemas.put(stepName, schema);
                     changed = true;
@@ -267,7 +292,8 @@ public final class KtrParser {
     private static List<String> computeStepOutputSchema(Element el,
                                                           String stepName, String stepType,
                                                           Map<String, List<String>> fieldSchemas,
-                                                          Map<String, String> upstreamOf) {
+                                                          Map<String, String> upstreamOf,
+                                                          Map<String, List<String>> allUpstreamsOf) {
         return switch (stepType) {
             // Pass-through steps: output schema == upstream schema
             case "SortRows", "FilterRows", "Unique", "UniqueRowsByHashSet",
@@ -276,7 +302,9 @@ public final class KtrParser {
                 yield up != null ? fieldSchemas.get(up) : null;
             }
             case "GroupBy", "MemoryGroupBy" -> computeGroupByOutputSchema(el);
-            case "MergeJoin"               -> computeMergeJoinOutputSchema(el, fieldSchemas);
+            case "MergeJoin"               -> computeMergeJoinOutputSchema(el, stepName,
+                                                                             fieldSchemas,
+                                                                             allUpstreamsOf);
             case "Formula"                 -> computeFormulaOutputSchema(el, stepName,
                                                                           fieldSchemas, upstreamOf);
             case "Calculator"              -> computeCalculatorOutputSchema(el, stepName,
@@ -333,11 +361,22 @@ public final class KtrParser {
         return schema.isEmpty() ? null : schema;
     }
 
-    /** MergeJoin output = left step's schema + right step's schema. */
-    private static List<String> computeMergeJoinOutputSchema(Element el,
-                                                               Map<String, List<String>> fieldSchemas) {
+    /**
+     * MergeJoin output = left step's schema + right step's schema.
+     * step1/step2 are read from the XML; when absent (newer Pentaho format omits them),
+     * they are inferred from the hop topology via {@code allUpstreamsOf}.
+     */
+    private static List<String> computeMergeJoinOutputSchema(Element el, String stepName,
+                                                               Map<String, List<String>> fieldSchemas,
+                                                               Map<String, List<String>> allUpstreamsOf) {
         String step1 = text(el, "step1");
         String step2 = text(el, "step2");
+        // Infer from hop topology when absent from XML
+        if (step1 == null || step2 == null) {
+            List<String> ups = allUpstreamsOf.getOrDefault(stepName, List.of());
+            if (step1 == null && !ups.isEmpty())     step1 = ups.get(0);
+            if (step2 == null && ups.size() >= 2)    step2 = ups.get(1);
+        }
         List<String> left  = step1 != null ? fieldSchemas.get(step1) : null;
         List<String> right = step2 != null ? fieldSchemas.get(step2) : null;
         if (left == null || right == null) return null; // upstream not yet resolved
@@ -454,7 +493,8 @@ public final class KtrParser {
     private List<StepDefinition> extractSteps(Document doc,
                                                Map<String, List<String>> fieldSchemas,
                                                Map<String, String> upstreamOf,
-                                               Map<String, List<String>> downstreamOf) {
+                                               Map<String, List<String>> downstreamOf,
+                                               Map<String, List<String>> allUpstreamsOf) {
         List<StepDefinition> steps = new ArrayList<>();
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         for (int i = 0; i < stepNodes.getLength(); i++) {
@@ -477,6 +517,12 @@ public final class KtrParser {
             } else if ("SortRows".equals(sd.type)) {
                 resolveColumnNames(sd.params, "columns", sd.id, upstreamOf, fieldSchemas);
             } else if ("MergeJoin".equals(sd.type)) {
+                // Inject step1/step2 from hop topology when absent from step XML
+                if (!sd.params.containsKey("step1")) {
+                    List<String> ups = allUpstreamsOf.getOrDefault(sd.id, List.of());
+                    if (!ups.isEmpty())     sd.params.put("step1", ups.get(0));
+                    if (ups.size() >= 2)    sd.params.put("step2", ups.get(1));
+                }
                 resolveMergeJoinColumns(sd.params, upstreamOf, fieldSchemas);
             } else if ("GroupBy".equals(sd.type) || "MemoryGroupBy".equals(sd.type)) {
                 resolveColumnNames(sd.params, "groupColumns", sd.id, upstreamOf, fieldSchemas);

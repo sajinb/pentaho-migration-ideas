@@ -67,9 +67,14 @@ public final class JobExecutor {
         List<String> order = topologicalSort(def.entries, incoming, outgoing);
 
         // ── 3. Build CompletableFuture per entry ───────────────────────────────
+        // Optional<Boolean>: present=ran (true=success/false=failure), empty=skipped.
+        // Fan-in rule: ALL non-skipped predecessors must satisfy their hop.
+        // If every predecessor was skipped, the entry is also skipped.
+        // This correctly handles mutually-exclusive branches converging at a terminal
+        // (e.g. SUCCESS) without deadlocking or running entries on inactive branches.
         ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
         try {
-            Map<String, CompletableFuture<Boolean>> futures = new LinkedHashMap<>();
+            Map<String, CompletableFuture<Optional<Boolean>>> futures = new LinkedHashMap<>();
 
             for (String entryId : order) {
                 List<EntryHopDefinition> inHops = incoming.get(entryId);
@@ -78,26 +83,29 @@ public final class JobExecutor {
                     // Source entry (Start) — run immediately
                     final String eid = entryId;
                     futures.put(eid, CompletableFuture.supplyAsync(
-                            () -> runEntry(def, eid, context), pool));
+                            () -> Optional.of(runEntry(def, eid, context)), pool));
                 } else {
                     // Capture predecessor futures and hops before the lambda
                     final String eid = entryId;
                     final List<EntryHopDefinition> capturedHops = List.copyOf(inHops);
                     @SuppressWarnings("unchecked")
-                    final CompletableFuture<Boolean>[] predFutures = inHops.stream()
+                    final CompletableFuture<Optional<Boolean>>[] predFutures = inHops.stream()
                             .map(h -> futures.get(h.from))
                             .toArray(CompletableFuture[]::new);
 
                     futures.put(eid, CompletableFuture.allOf(predFutures)
                             .thenApplyAsync(ignored -> {
-                                // All predecessors done. Check that EVERY incoming hop is satisfied.
+                                boolean anyNonSkipped = false;
                                 for (int i = 0; i < capturedHops.size(); i++) {
-                                    boolean predSuccess = predFutures[i].join();
-                                    if (!shouldFollow(capturedHops.get(i), predSuccess)) {
-                                        return true; // skip this entry
+                                    Optional<Boolean> predResult = predFutures[i].join();
+                                    if (predResult.isEmpty()) continue; // skipped — ignore
+                                    anyNonSkipped = true;
+                                    if (!shouldFollow(capturedHops.get(i), predResult.get())) {
+                                        return Optional.<Boolean>empty(); // unsatisfied hop
                                     }
                                 }
-                                return runEntry(def, eid, context);
+                                if (!anyNonSkipped) return Optional.<Boolean>empty();
+                                return Optional.of(runEntry(def, eid, context));
                             }, pool));
                 }
             }
@@ -108,9 +116,12 @@ public final class JobExecutor {
             Set<String> hasSucessors = outgoing.values().stream()
                     .flatMap(List::stream).collect(Collectors.toSet());
             boolean allSuccess = true;
-            for (Map.Entry<String, CompletableFuture<Boolean>> e : futures.entrySet()) {
-                if (!hasSucessors.contains(e.getKey()) && Boolean.FALSE.equals(e.getValue().get())) {
-                    allSuccess = false;
+            for (Map.Entry<String, CompletableFuture<Optional<Boolean>>> e : futures.entrySet()) {
+                if (!hasSucessors.contains(e.getKey())) {
+                    Optional<Boolean> result = e.getValue().get();
+                    if (result.isPresent() && Boolean.FALSE.equals(result.get())) {
+                        allSuccess = false;
+                    }
                 }
             }
             return allSuccess;

@@ -659,4 +659,96 @@ class KjbParserTest {
         assertTrue(def.hops.stream().allMatch(h -> "success".equals(h.evaluation)),
                 "All hops should default to success evaluation");
     }
+
+    // -------------------------------------------------------------------------
+    // Real-world KJB patterns from J_READ_ENRICH_TRADERISK:
+    //  - <evaluation>Y/N</evaluation> (not true/false)
+    //  - SPECIAL with no <success>Y</success> → Success
+    //  - EVAL_FILES_METRICS, DELETE_FILE, EVAL, MOVE_FILES → Dummy
+    // -------------------------------------------------------------------------
+
+    @Test
+    void realWorldKjb_evaluationYN_mappedCorrectly() throws Exception {
+        // Real Pentaho-generated KJBs use <evaluation>Y</evaluation> for success
+        // and <evaluation>N</evaluation> for failure — NOT true/false.
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>eval_yn_test</name>
+              <entries>
+                <entry><name>Start</name><type>SPECIAL</type><start>Y</start></entry>
+                <entry><name>Step</name><type>TRANS</type><filename>x.ktr</filename></entry>
+                <entry><name>OnSuccess</name><type>WRITE_TO_LOG</type><logmessage>ok</logmessage></entry>
+                <entry><name>OnFailure</name><type>ABORT</type></entry>
+              </entries>
+              <hops>
+                <hop><from>Start</from><to>Step</to><enabled>Y</enabled>
+                     <evaluation>Y</evaluation><unconditional>N</unconditional></hop>
+                <hop><from>Step</from><to>OnSuccess</to><enabled>Y</enabled>
+                     <evaluation>Y</evaluation><unconditional>N</unconditional></hop>
+                <hop><from>Step</from><to>OnFailure</to><enabled>Y</enabled>
+                     <evaluation>N</evaluation><unconditional>N</unconditional></hop>
+              </hops>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+        assertEquals(3, def.hops.size());
+        // evaluation=Y → success
+        assertEquals("success",  def.hops.get(0).evaluation);
+        assertEquals("success",  def.hops.get(1).evaluation);
+        // evaluation=N → failure (was broken before this fix)
+        assertEquals("failure",  def.hops.get(2).evaluation);
+    }
+
+    @Test
+    void realWorldKjb_specialNoSuccessFlag_resolvedAsSuccess() throws Exception {
+        // Pentaho sometimes omits <success>Y</success> for the SUCCESS terminal entry.
+        // The SPECIAL entry with start=N, dummy=N, no success=Y should resolve to "Success".
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>special_test</name>
+              <entries>
+                <entry>
+                  <name>START</name><type>SPECIAL</type><start>Y</start><dummy>N</dummy>
+                </entry>
+                <entry>
+                  <name>SUCCESS</name><type>SPECIAL</type><start>N</start><dummy>N</dummy>
+                </entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+        assertEquals("Start",   def.entries.get(0).type);
+        // start=N, dummy=N, no success=Y → must resolve to "Success" not "Start"
+        assertEquals("Success", def.entries.get(1).type);
+    }
+
+    @Test
+    void realWorldKjb_fileSystemEntryTypes_mappedToDummy() throws Exception {
+        // EVAL_FILES_METRICS, DELETE_FILE, EVAL, MOVE_FILES have no native implementations.
+        // They are mapped to Dummy (always returns true) so the rest of the job can run.
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>fs_types_test</name>
+              <entries>
+                <entry><name>checkSize</name><type>EVAL_FILES_METRICS</type></entry>
+                <entry><name>delFile</name><type>DELETE_FILE</type></entry>
+                <entry><name>evalExpr</name><type>EVAL</type></entry>
+                <entry><name>moveFiles</name><type>MOVE_FILES</type></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+        assertEquals("Dummy", def.entries.get(0).type); // EVAL_FILES_METRICS
+        assertEquals("Dummy", def.entries.get(1).type); // DELETE_FILE
+        assertEquals("Dummy", def.entries.get(2).type); // EVAL
+        assertEquals("Dummy", def.entries.get(3).type); // MOVE_FILES
+    }
 }

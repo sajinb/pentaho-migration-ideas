@@ -93,7 +93,10 @@ public final class KjbParser {
             if ("Y".equalsIgnoreCase(text(el, "start")))   return "Start";
             if ("Y".equalsIgnoreCase(text(el, "success"))) return "Success";
             if ("Y".equalsIgnoreCase(text(el, "abort")))   return "Abort";
-            return "Start"; // default for unrecognised SPECIAL
+            if ("Y".equalsIgnoreCase(text(el, "dummy")))   return "Dummy";
+            // Real Pentaho KJBs sometimes omit <success>Y</success> for SUCCESS endpoints.
+            // A SPECIAL entry with no positive flag is always a Success terminal.
+            return "Success";
         }
         return normalizeEntryType(type);
     }
@@ -117,6 +120,13 @@ public final class KjbParser {
             // provides identical semantics from hop topology alone, so this entry is a no-op.
             case "BLOCKUNTILSTEPSFINISH" -> "Dummy";
             case "DUMMY"              -> "Dummy";
+            // File-system / evaluation job entries — no native implementations yet.
+            // Mapped to Dummy (always returns true) so the engine can parse and run
+            // the rest of the job; callers should replace with real implementations.
+            case "EVAL_FILES_METRICS" -> "Dummy";   // check file size/count condition
+            case "DELETE_FILE"        -> "Dummy";   // delete a file
+            case "EVAL"               -> "Dummy";   // evaluate JavaScript/expression condition
+            case "MOVE_FILES"         -> "Dummy";   // move or rename files
             // These three can appear either as SPECIAL sub-types (handled in resolveEntryType)
             // or directly as top-level type values in non-standard KJBs.
             case "SUCCESS"            -> "Success";
@@ -222,8 +232,9 @@ public final class KjbParser {
             return "unconditional";
         }
         String evaluation = text(hop, "evaluation");
-        if ("false".equalsIgnoreCase(evaluation)) return "failure";
-        return "success"; // default: true / missing
+        // Real KJBs use Y/N; test/synthetic KJBs use true/false — handle both.
+        if ("false".equalsIgnoreCase(evaluation) || "N".equalsIgnoreCase(evaluation)) return "failure";
+        return "success"; // default: true / Y / missing
     }
 
     private static String text(Element parent, String tag) {

@@ -340,6 +340,65 @@ class TransformationExecutorTest {
         assertEquals(4, executionOrder.size());
     }
 
+    // -------------------------------------------------------------------------
+    // Skip propagation: mutually-exclusive branches converging at a terminal
+    // -------------------------------------------------------------------------
+
+    @Test
+    void mutuallyExclusiveBranches_terminalRunsOnce() throws Exception {
+        // Topology (mirrors the SUCCESS terminal pattern in real KJBs):
+        //
+        //   Start ──success──► Gate ──success──► BranchA ──success──► Terminal
+        //                         └──failure──► BranchB ──success──► Terminal
+        //
+        // Gate succeeds → BranchA runs; BranchB is SKIPPED (failure hop from a successful gate).
+        // Terminal has two incoming success hops: from BranchA and from BranchB.
+        // Expected: Terminal runs exactly ONCE via BranchA; the skipped BranchB must NOT
+        // incorrectly satisfy Terminal's other incoming hop and cause it to be skipped entirely.
+        //
+        // Before the skip-propagation fix, BranchB (skipped) returned `true`, which propagated
+        // as "success" to Terminal, causing Terminal to appear to have been reached from both
+        // branches and run with garbled semantics.
+
+        List<String> ran = Collections.synchronizedList(new ArrayList<>());
+
+        JobEntryRegistry registry = new JobEntryRegistry();
+        registry.register("Start",   com.pentaho.migration.entry.impl.StartEntry.class);
+        registry.registerFactory("GateEntry",    p -> ctx -> { ran.add("Gate");     return true;  });
+        registry.registerFactory("BranchAEntry", p -> ctx -> { ran.add("BranchA"); return true;  });
+        registry.registerFactory("BranchBEntry", p -> ctx -> { ran.add("BranchB"); return true;  });
+        registry.registerFactory("TerminalEntry",p -> ctx -> { ran.add("Terminal"); return true; });
+
+        JobDefinition jDef = new JobDefinition();
+        jDef.name    = "exclusive_branches";
+        jDef.entries = List.of(
+            entry("Start",    "Start",        Map.of()),
+            entry("Gate",     "GateEntry",    Map.of()),
+            entry("BranchA",  "BranchAEntry", Map.of()),
+            entry("BranchB",  "BranchBEntry", Map.of()),
+            entry("Terminal", "TerminalEntry", Map.of())
+        );
+        jDef.hops = List.of(
+            entryHop("Start",   "Gate",     "unconditional"),
+            entryHop("Gate",    "BranchA",  "success"),   // taken  (Gate succeeds)
+            entryHop("Gate",    "BranchB",  "failure"),   // skipped (Gate succeeds)
+            entryHop("BranchA", "Terminal", "success"),
+            entryHop("BranchB", "Terminal", "success")
+        );
+
+        boolean result = new JobExecutor(registry).execute(jDef);
+        assertTrue(result);
+
+        // Gate and BranchA ran; BranchB was skipped
+        assertTrue(ran.contains("Gate"),    "Gate must run");
+        assertTrue(ran.contains("BranchA"), "BranchA must run (success branch)");
+        assertFalse(ran.contains("BranchB"),"BranchB must NOT run (failure branch skipped)");
+
+        // Terminal must run exactly once via BranchA
+        assertEquals(1, Collections.frequency(ran, "Terminal"),
+                "Terminal must run exactly once — not skipped due to BranchB's skipped state");
+    }
+
     @Test
     void memoryGroupByStep() throws Exception {
         Path input  = writeCsv("gb_in.csv", "dept,salary",

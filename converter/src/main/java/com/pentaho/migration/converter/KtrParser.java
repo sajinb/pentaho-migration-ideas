@@ -82,6 +82,8 @@ public final class KtrParser {
             Map.entry("InsertUpdate",          "InsertUpdate"),
             Map.entry("Delete",                "Delete"),
             Map.entry("ExecSQL",               "ExecSQL"),
+            Map.entry("ScriptValueMod",        "ScriptValueMod"),
+            Map.entry("ModifiedJavaScriptValue", "ScriptValueMod"),
             Map.entry("GroupBy",               "GroupBy"),
             Map.entry("MemoryGroupBy",         "MemoryGroupBy"),
             Map.entry("Unique",                "Unique"),

@@ -39,9 +39,15 @@ public final class FilterRowsMapper implements StepXmlMapper {
     public Map<String, String> map(Element e) {
         Map<String, String> p = new HashMap<>();
 
-        // Routing targets
-        put(p, "trueStep",  child(e, "send_true_to"));
-        put(p, "falseStep", child(e, "send_false_to"));
+        // Routing targets — Pentaho uses either <send_true_to>/<send_false_to>
+        // or <true_step>/<false_step> depending on the KTR version.
+        String trueTarget = child(e, "send_true_to");
+        if (trueTarget == null) trueTarget = child(e, "true_step");
+        put(p, "trueStep",  trueTarget);
+
+        String falseTarget = child(e, "send_false_to");
+        if (falseTarget == null) falseTarget = child(e, "false_step");
+        put(p, "falseStep", falseTarget);
 
         // ── Older <compare> block ──────────────────────────────────────────────
         NodeList compareNodes = e.getElementsByTagName("compare");
@@ -87,13 +93,13 @@ public final class FilterRowsMapper implements StepXmlMapper {
     private static String normalizeOperator(String op) {
         if (op == null) return null;
         return switch (op.trim()) {
-            case ">"        -> "GT";
-            case "<"        -> "LT";
-            case ">="       -> "GTE";
-            case "<="       -> "LTE";
-            case "="        -> "EQ";
-            case "<>", "!=" -> "NEQ";
-            default         -> op; // already GT / LT / etc.
+            case ">",  "GT"                         -> "GT";
+            case "<",  "LT"                         -> "LT";
+            case ">=", "=>", "GTE", "GREATER_EQUAL" -> "GTE";  // "=>" is a Pentaho quirk
+            case "<=", "=<", "LTE", "LESS_EQUAL"    -> "LTE";
+            case "=",  "EQ", "EQUAL"                -> "EQ";
+            case "<>", "!=", "NEQ", "NOT_EQUAL"     -> "NEQ";
+            default                                  -> op;
         };
     }
 

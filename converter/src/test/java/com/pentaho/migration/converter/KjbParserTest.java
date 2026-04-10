@@ -405,4 +405,132 @@ class KjbParserTest {
         long fromD = def.hops.stream().filter(h -> "Run TransformD".equals(h.from)).count();
         assertEquals(0, fromD, "TransformD should have no outgoing hops");
     }
+
+    // -------------------------------------------------------------------------
+    // daily_transaction_job: CHECK_FILE_EXISTS, Shell, Mail; entries/hops as
+    // direct <job> children (no <entries>/<hops> wrapper); failure hops
+    // -------------------------------------------------------------------------
+
+    @Test
+    void dailyTransactionJob_parsedCorrectly() throws Exception {
+        // Real-world KJB format:
+        //  - entries/hops are direct children of <job> (no wrapper elements)
+        //  - CHECK_FILE_EXISTS → FileExists with filePath param
+        //  - Shell → ExecProcess with command param (from <script> CDATA)
+        //  - Mail → Mail with to + subject params
+        //  - <evaluation>FALSE</evaluation> (uppercase) → "failure"
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>daily_transaction_job</name>
+
+              <entry>
+                <name>START</name>
+                <type>SPECIAL</type>
+                <start>Y</start>
+              </entry>
+
+              <entry>
+                <name>Check Input Files</name>
+                <type>CHECK_FILE_EXISTS</type>
+                <filename>C:/test/input/input.csv</filename>
+                <fail_if_no_file>Y</fail_if_no_file>
+              </entry>
+
+              <entry>
+                <name>Run Daily Transform</name>
+                <type>TRANSFORMATION</type>
+                <filename>/opt/etl/daily_transform.ktr</filename>
+              </entry>
+
+              <entry>
+                <name>Archive Input Files</name>
+                <type>Shell</type>
+                <script><![CDATA[move C:\\test\\input\\input.csv C:\\test\\archive\\]]></script>
+              </entry>
+
+              <entry>
+                <name>Send Failure Mail</name>
+                <type>Mail</type>
+                <destination>etl-alerts@company.com</destination>
+                <subject>Daily Transaction Job Failed</subject>
+              </entry>
+
+              <hop>
+                <from>START</from><to>Check Input Files</to>
+                <enabled>Y</enabled><unconditional>Y</unconditional>
+              </hop>
+              <hop>
+                <from>Check Input Files</from><to>Run Daily Transform</to>
+                <enabled>Y</enabled>
+                <evaluation>true</evaluation><unconditional>N</unconditional>
+              </hop>
+              <hop>
+                <from>Check Input Files</from><to>Send Failure Mail</to>
+                <enabled>Y</enabled>
+                <evaluation>FALSE</evaluation><unconditional>N</unconditional>
+              </hop>
+              <hop>
+                <from>Run Daily Transform</from><to>Archive Input Files</to>
+                <enabled>Y</enabled>
+                <evaluation>true</evaluation><unconditional>N</unconditional>
+              </hop>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("daily_transaction_job", def.name);
+        assertEquals(5, def.entries.size());
+        assertEquals(4, def.hops.size());
+
+        // START
+        EntryDefinition start = def.entries.get(0);
+        assertEquals("Start", start.type);
+
+        // CHECK_FILE_EXISTS → FileExists
+        EntryDefinition checkFile = def.entries.get(1);
+        assertEquals("FileExists", checkFile.type);
+        assertEquals("C:/test/input/input.csv", checkFile.params.get("filePath"));
+        assertEquals("true", checkFile.params.get("failIfNoFile"));
+
+        // TRANSFORMATION → RunTransformation with .ktr → .yaml
+        EntryDefinition runTransform = def.entries.get(2);
+        assertEquals("RunTransformation", runTransform.type);
+        assertEquals("/opt/etl/daily_transform.yaml", runTransform.params.get("transformationPath"));
+
+        // Shell → ExecProcess with script CDATA as command
+        EntryDefinition archive = def.entries.get(3);
+        assertEquals("ExecProcess", archive.type);
+        assertNotNull(archive.params.get("command"), "Shell script should be mapped to command param");
+        assertTrue(archive.params.get("command").contains("move"), "command should contain the shell script content");
+
+        // Mail → Mail with to + subject
+        EntryDefinition mail = def.entries.get(4);
+        assertEquals("Mail", mail.type);
+        assertEquals("etl-alerts@company.com", mail.params.get("to"));
+        assertEquals("Daily Transaction Job Failed", mail.params.get("subject"));
+
+        // Hops: unconditional, success, failure (uppercase FALSE), success
+        EntryHopDefinition startHop = def.hops.get(0);
+        assertEquals("START", startHop.from);
+        assertEquals("Check Input Files", startHop.to);
+        assertEquals("unconditional", startHop.evaluation);
+
+        EntryHopDefinition successHop = def.hops.get(1);
+        assertEquals("Check Input Files", successHop.from);
+        assertEquals("Run Daily Transform", successHop.to);
+        assertEquals("success", successHop.evaluation);
+
+        // <evaluation>FALSE</evaluation> (uppercase) must resolve to "failure"
+        EntryHopDefinition failureHop = def.hops.get(2);
+        assertEquals("Check Input Files", failureHop.from);
+        assertEquals("Send Failure Mail", failureHop.to);
+        assertEquals("failure", failureHop.evaluation);
+
+        EntryHopDefinition archiveHop = def.hops.get(3);
+        assertEquals("Run Daily Transform", archiveHop.from);
+        assertEquals("Archive Input Files", archiveHop.to);
+        assertEquals("success", archiveHop.evaluation);
+    }
 }

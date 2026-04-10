@@ -102,21 +102,24 @@ public final class KjbParser {
         if (type == null) return "Unknown";
         return switch (type.toUpperCase()) {
             case "TRANS", "TRANSFORMATION" -> "RunTransformation";
-            case "JOB"             -> "RunJob";
-            case "MAIL"            -> "Mail";
-            case "WRITE_TO_LOG"    -> "WriteToLog";
-            case "EXEC_SQL"        -> "ExecSQL";
-            case "SET_VARIABLE"    -> "SetVariable";
-            case "GET_VARIABLE"    -> "GetVariable";
-            case "EXEC_PROCESS"    -> "ExecProcess";
-            case "FILE_EXISTS"     -> "FileExists";
-            case "DUMMY"           -> "Dummy";
+            case "JOB"                -> "RunJob";
+            case "MAIL"               -> "Mail";
+            case "WRITE_TO_LOG"       -> "WriteToLog";
+            case "EXEC_SQL"           -> "ExecSQL";
+            case "SET_VARIABLE"       -> "SetVariable";
+            case "GET_VARIABLE"       -> "GetVariable";
+            case "EXEC_PROCESS"       -> "ExecProcess";
+            // Both standard FILE_EXISTS and Pentaho's CHECK_FILE_EXISTS map to FileExists
+            case "FILE_EXISTS", "CHECK_FILE_EXISTS" -> "FileExists";
+            // Shell scripts run via /bin/sh — map to ExecProcess which already handles that
+            case "SHELL"              -> "ExecProcess";
+            case "DUMMY"              -> "Dummy";
             // These three can appear either as SPECIAL sub-types (handled in resolveEntryType)
             // or directly as top-level type values in non-standard KJBs.
-            case "SUCCESS"         -> "Success";
-            case "ABORT"           -> "Abort";
-            case "START"           -> "Start";
-            default                -> type;
+            case "SUCCESS"            -> "Success";
+            case "ABORT"              -> "Abort";
+            case "START"              -> "Start";
+            default                   -> type;
         };
     }
 
@@ -145,11 +148,33 @@ public final class KjbParser {
                 String sql = text(el, "sql");
                 if (sql != null) params.put("sql", sql);
             }
+            case "ExecProcess" -> {
+                // Standard ExecProcess uses <command>; Shell entry uses <script> CDATA
+                String cmd = text(el, "command");
+                if (cmd == null || cmd.isBlank()) cmd = text(el, "script");
+                if (cmd != null) params.put("command", cmd);
+            }
+            case "FileExists" -> {
+                // Both FILE_EXISTS and CHECK_FILE_EXISTS use <filename>
+                String filePath = text(el, "filename");
+                if (filePath != null) params.put("filePath", filePath);
+                String failIfNo = text(el, "fail_if_no_file");
+                if (failIfNo != null) params.put("failIfNoFile", "Y".equalsIgnoreCase(failIfNo) ? "true" : "false");
+            }
             case "Mail" -> {
+                // Recipient / subject / body
                 String dest = text(el, "destination");
                 if (dest != null) params.put("to", dest);
                 String subj = text(el, "subject");
                 if (subj != null) params.put("subject", subj);
+                String body = text(el, "body");
+                if (body != null) params.put("body", body);
+                // SMTP server config (optional — runtime may have defaults)
+                String server = text(el, "server");
+                if (server != null) params.put("host", server);
+                String from = text(el, "from_address");
+                if (from == null) from = text(el, "replyto");
+                if (from != null) params.put("from", from);
             }
             // Start, Success, Abort, Dummy — no params needed
         }

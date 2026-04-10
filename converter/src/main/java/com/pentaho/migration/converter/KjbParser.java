@@ -101,7 +101,7 @@ public final class KjbParser {
     private static String normalizeEntryType(String type) {
         if (type == null) return "Unknown";
         return switch (type.toUpperCase()) {
-            case "TRANS"           -> "RunTransformation";
+            case "TRANS", "TRANSFORMATION" -> "RunTransformation";
             case "JOB"             -> "RunJob";
             case "MAIL"            -> "Mail";
             case "WRITE_TO_LOG"    -> "WriteToLog";

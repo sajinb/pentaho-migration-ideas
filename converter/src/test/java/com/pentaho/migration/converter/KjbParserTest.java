@@ -264,4 +264,69 @@ class KjbParserTest {
         assertEquals("success", def.hops.get(0).evaluation);
         assertEquals("success", def.hops.get(1).evaluation);
     }
+
+    // -------------------------------------------------------------------------
+    // Master_Job.kjb: <type>Transformation</type> + <type>START</type>
+    // -------------------------------------------------------------------------
+
+    @Test
+    void masterJob_transformationType_parsedCorrectly() throws Exception {
+        // Real-world format: <type>START</type> (not SPECIAL) and <type>Transformation</type>
+        // (not TRANS). Hops have no <evaluation> or <unconditional> — default to "success".
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job xmlns="http://www.pentaho.com/kettle/job/">
+              <name>Master Job</name>
+              <entries>
+                <entry>
+                  <name>Start</name>
+                  <type>START</type>
+                </entry>
+                <entry>
+                  <name>Run Transform1</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/Transform1.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Run Transform2</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/Transform2.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Run Transform3</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/Transform3.ktr</filename>
+                </entry>
+              </entries>
+              <hops>
+                <hop><from>Start</from><to>Run Transform1</to><enabled>Y</enabled></hop>
+                <hop><from>Run Transform1</from><to>Run Transform2</to><enabled>Y</enabled></hop>
+                <hop><from>Run Transform2</from><to>Run Transform3</to><enabled>Y</enabled></hop>
+              </hops>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("Master Job", def.name);
+        assertEquals(4, def.entries.size());
+        assertEquals(3, def.hops.size());
+
+        // <type>START</type> → "Start"
+        assertEquals("Start", def.entries.get(0).type);
+
+        // <type>Transformation</type> → "RunTransformation" + .ktr → .yaml
+        assertEquals("RunTransformation", def.entries.get(1).type);
+        assertEquals("/path/to/Transform1.yaml", def.entries.get(1).params.get("transformationPath"));
+        assertEquals("RunTransformation", def.entries.get(2).type);
+        assertEquals("/path/to/Transform2.yaml", def.entries.get(2).params.get("transformationPath"));
+        assertEquals("RunTransformation", def.entries.get(3).type);
+        assertEquals("/path/to/Transform3.yaml", def.entries.get(3).params.get("transformationPath"));
+
+        // Hops: no <evaluation>/<unconditional> → defaults to "success"
+        assertEquals("Start",        def.hops.get(0).from);
+        assertEquals("Run Transform1", def.hops.get(0).to);
+        assertEquals("Run Transform2", def.hops.get(1).to);
+        assertEquals("Run Transform3", def.hops.get(2).to);
+    }
 }

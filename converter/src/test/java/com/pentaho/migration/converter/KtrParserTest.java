@@ -1002,4 +1002,89 @@ class KtrParserTest {
         assertEquals("SortRows",      def.steps.get(1).type);
         assertEquals("MappingOutput", def.steps.get(2).type);
     }
+
+    // -------------------------------------------------------------------------
+    // Transform3: AppendStreams fan-in (two CsvInputs → Append → TextFileOutput)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void transform3_appendStreamsFanIn_parsedCorrectly() throws Exception {
+        // Matches the Transform3.ktr: two CsvInput steps feed AppendStreams, then TextFileOutput.
+        // Exercises: <AppendStreams> → "Append" type mapping, fan-in hop topology.
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation xmlns="http://www.pentaho.com/kettle/transformation/">
+              <info>
+                <name>Transform3</name>
+                <description>Merges output1.csv and output2.csv</description>
+              </info>
+              <step>
+                <name>CSV Input 1</name>
+                <type>CsvInput</type>
+                <fields>
+                  <field><name>id</name><type>Integer</type></field>
+                  <field><name>value</name><type>String</type></field>
+                </fields>
+                <file><name>/path/to/output1.csv</name></file>
+                <content><separator>,</separator><header>Y</header></content>
+              </step>
+              <step>
+                <name>CSV Input 2</name>
+                <type>CsvInput</type>
+                <fields>
+                  <field><name>code</name><type>String</type></field>
+                  <field><name>description</name><type>String</type></field>
+                </fields>
+                <file><name>/path/to/output2.csv</name></file>
+                <content><separator>,</separator><header>Y</header></content>
+              </step>
+              <step>
+                <name>Append Streams</name>
+                <type>AppendStreams</type>
+              </step>
+              <step>
+                <name>Text File Output</name>
+                <type>TextFileOutput</type>
+                <file>
+                  <name>/path/to/final_output.csv</name>
+                  <separator>,</separator>
+                  <header>Y</header>
+                </file>
+              </step>
+              <hop><from>CSV Input 1</from><to>Append Streams</to><enabled>Y</enabled></hop>
+              <hop><from>CSV Input 2</from><to>Append Streams</to><enabled>Y</enabled></hop>
+              <hop><from>Append Streams</from><to>Text File Output</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("Transform3", def.name);
+        assertEquals(4, def.steps.size());
+        assertEquals(3, def.hops.size());
+
+        // CSV Input 1
+        StepDefinition csv1 = def.steps.get(0);
+        assertEquals("CsvInput", csv1.type);
+        assertEquals("/path/to/output1.csv", csv1.params.get("filePath"));
+
+        // CSV Input 2
+        StepDefinition csv2 = def.steps.get(1);
+        assertEquals("CsvInput", csv2.type);
+        assertEquals("/path/to/output2.csv", csv2.params.get("filePath"));
+
+        // AppendStreams → normalised to "Append"
+        StepDefinition append = def.steps.get(2);
+        assertEquals("Append", append.type);
+
+        // TextFileOutput
+        StepDefinition out = def.steps.get(3);
+        assertEquals("TextFileOutput", out.type);
+        assertEquals("/path/to/final_output.csv", out.params.get("filePath"));
+
+        // Fan-in: two hops converge on Append Streams
+        long inboundToAppend = def.hops.stream()
+                .filter(h -> "Append Streams".equals(h.to)).count();
+        assertEquals(2, inboundToAppend, "Both CsvInput hops should target Append Streams");
+    }
 }

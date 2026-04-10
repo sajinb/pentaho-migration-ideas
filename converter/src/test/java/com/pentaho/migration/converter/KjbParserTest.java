@@ -533,4 +533,130 @@ class KjbParserTest {
         assertEquals("Archive Input Files", archiveHop.to);
         assertEquals("success", archiveHop.evaluation);
     }
+
+    // -------------------------------------------------------------------------
+    // daily_parallel_aggregation_job:
+    //  - BlockUntilStepsFinish explicit sync barrier
+    //  - wait_for_finish=N on parallel KTR entries
+    //  - fan-out (Load → A, B in parallel) + fan-in (A, B → Wait)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void dailyParallelAggregationJob_parsedCorrectly() throws Exception {
+        // Key patterns:
+        //  BlockUntilStepsFinish → Dummy: our engine's CompletableFuture.allOf() fan-in
+        //  already provides this synchronization from hop topology alone.
+        //  wait_for_finish=N on RunTransformation entries: in our engine parallel
+        //  execution comes from fan-out topology, not from this flag; it has no effect.
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job xmlns="http://www.pentaho.com/kettle/job/">
+              <name>daily_parallel_aggregation_job</name>
+
+              <entry>
+                <name>START</name>
+                <type>START</type>
+                <start>Y</start>
+                <enabled>Y</enabled>
+              </entry>
+
+              <entry>
+                <name>Load And Validate Data</name>
+                <type>Transformation</type>
+                <filename>load_validate.ktr</filename>
+                <wait_for_finish>Y</wait_for_finish>
+                <enabled>Y</enabled>
+              </entry>
+
+              <entry>
+                <name>Customer Aggregation</name>
+                <type>Transformation</type>
+                <filename>customer_aggregate.ktr</filename>
+                <wait_for_finish>N</wait_for_finish>
+                <enabled>Y</enabled>
+              </entry>
+
+              <entry>
+                <name>Region Aggregation</name>
+                <type>Transformation</type>
+                <filename>region_aggregate.ktr</filename>
+                <wait_for_finish>N</wait_for_finish>
+                <enabled>Y</enabled>
+              </entry>
+
+              <entry>
+                <name>Wait For Aggregations</name>
+                <type>BlockUntilStepsFinish</type>
+                <stepnames>
+                  <stepname>Customer Aggregation</stepname>
+                  <stepname>Region Aggregation</stepname>
+                </stepnames>
+                <enabled>Y</enabled>
+              </entry>
+
+              <entry>
+                <name>Reconciliation</name>
+                <type>Transformation</type>
+                <filename>reconciliation.ktr</filename>
+                <wait_for_finish>Y</wait_for_finish>
+                <enabled>Y</enabled>
+              </entry>
+
+              <hop><from>START</from><to>Load And Validate Data</to><enabled>Y</enabled></hop>
+              <hop><from>Load And Validate Data</from><to>Customer Aggregation</to><enabled>Y</enabled></hop>
+              <hop><from>Load And Validate Data</from><to>Region Aggregation</to><enabled>Y</enabled></hop>
+              <hop><from>Customer Aggregation</from><to>Wait For Aggregations</to><enabled>Y</enabled></hop>
+              <hop><from>Region Aggregation</from><to>Wait For Aggregations</to><enabled>Y</enabled></hop>
+              <hop><from>Wait For Aggregations</from><to>Reconciliation</to><enabled>Y</enabled></hop>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("daily_parallel_aggregation_job", def.name);
+        assertEquals(6, def.entries.size());
+        assertEquals(6, def.hops.size());
+
+        // START
+        assertEquals("Start", def.entries.get(0).type);
+
+        // Load And Validate Data — sequential (wait_for_finish=Y doesn't affect our model)
+        EntryDefinition load = def.entries.get(1);
+        assertEquals("RunTransformation", load.type);
+        assertEquals("load_validate.yaml", load.params.get("transformationPath"));
+
+        // Customer Aggregation — parallel (wait_for_finish=N)
+        EntryDefinition custAgg = def.entries.get(2);
+        assertEquals("RunTransformation", custAgg.type);
+        assertEquals("customer_aggregate.yaml", custAgg.params.get("transformationPath"));
+
+        // Region Aggregation — parallel (wait_for_finish=N)
+        EntryDefinition regionAgg = def.entries.get(3);
+        assertEquals("RunTransformation", regionAgg.type);
+        assertEquals("region_aggregate.yaml", regionAgg.params.get("transformationPath"));
+
+        // BlockUntilStepsFinish → Dummy (engine fan-in handles synchronization via allOf())
+        EntryDefinition waitEntry = def.entries.get(4);
+        assertEquals("Wait For Aggregations", waitEntry.id);
+        assertEquals("Dummy", waitEntry.type);
+
+        // Reconciliation
+        EntryDefinition recon = def.entries.get(5);
+        assertEquals("RunTransformation", recon.type);
+        assertEquals("reconciliation.yaml", recon.params.get("transformationPath"));
+
+        // Fan-out from Load And Validate Data: 2 outgoing hops (Customer, Region)
+        long fromLoad = def.hops.stream()
+                .filter(h -> "Load And Validate Data".equals(h.from)).count();
+        assertEquals(2, fromLoad, "Load And Validate Data should have 2 outgoing hops");
+
+        // Fan-in to Wait For Aggregations: 2 incoming hops
+        long toWait = def.hops.stream()
+                .filter(h -> "Wait For Aggregations".equals(h.to)).count();
+        assertEquals(2, toWait, "Wait For Aggregations should have 2 incoming hops");
+
+        // All hops with no evaluation/unconditional default to "success"
+        assertTrue(def.hops.stream().allMatch(h -> "success".equals(h.evaluation)),
+                "All hops should default to success evaluation");
+    }
 }

@@ -113,6 +113,9 @@ public final class KjbParser {
             case "FILE_EXISTS", "CHECK_FILE_EXISTS" -> "FileExists";
             // Shell scripts run via /bin/sh — map to ExecProcess which already handles that
             case "SHELL"              -> "ExecProcess";
+            // Explicit Pentaho sync barrier. Our engine's CompletableFuture.allOf() fan-in
+            // provides identical semantics from hop topology alone, so this entry is a no-op.
+            case "BLOCKUNTILSTEPSFINISH" -> "Dummy";
             case "DUMMY"              -> "Dummy";
             // These three can appear either as SPECIAL sub-types (handled in resolveEntryType)
             // or directly as top-level type values in non-standard KJBs.

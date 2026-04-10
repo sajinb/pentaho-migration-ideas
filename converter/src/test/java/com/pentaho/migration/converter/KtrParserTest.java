@@ -656,6 +656,162 @@ class KtrParserTest {
     }
 
     @Test
+    void complexConditionalRouting_multiFields_parsedCorrectly() throws Exception {
+        // KTR: CsvInput → FilterRows (priority=High AND status=Pending) → FilterRows (status=Closed AND region=US)
+        //      → SwitchCase (status) → TextFileOutput (x4)
+        // Exercises: compound <condition> block, <true_step>/<false_step>, SwitchCase with two named cases.
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation xmlns="http://www.pentaho.com/kettle/transformation/">
+              <info>
+                <name>Complex_Conditional_Routing_MultiFields</name>
+              </info>
+              <step>
+                <name>CSV Input</name>
+                <type>CsvInput</type>
+                <file>
+                  <name>/path/to/csv/input_complex.csv</name>
+                </file>
+                <content>
+                  <separator>,</separator>
+                  <enclosure>"</enclosure>
+                  <header>Y</header>
+                </content>
+                <fields>
+                  <field><name>id</name><type>Integer</type></field>
+                  <field><name>status</name><type>String</type></field>
+                  <field><name>priority</name><type>String</type></field>
+                  <field><name>region</name><type>String</type></field>
+                </fields>
+              </step>
+              <step>
+                <name>Filter High Priority Pending</name>
+                <type>FilterRows</type>
+                <condition>
+                  <condition>
+                    <leftvalue>priority</leftvalue>
+                    <function>=</function>
+                    <rightvalue>High</rightvalue>
+                    <valuetype>String</valuetype>
+                  </condition>
+                  <condition_type>AND</condition_type>
+                  <next_condition>
+                    <leftvalue>status</leftvalue>
+                    <function>=</function>
+                    <rightvalue>Pending</rightvalue>
+                    <valuetype>String</valuetype>
+                  </next_condition>
+                </condition>
+                <true_step>High Priority Pending Output</true_step>
+                <false_step>Filter Closed US</false_step>
+              </step>
+              <step>
+                <name>Filter Closed US</name>
+                <type>FilterRows</type>
+                <condition>
+                  <condition>
+                    <leftvalue>status</leftvalue>
+                    <function>=</function>
+                    <rightvalue>Closed</rightvalue>
+                    <valuetype>String</valuetype>
+                  </condition>
+                  <condition_type>AND</condition_type>
+                  <next_condition>
+                    <leftvalue>region</leftvalue>
+                    <function>=</function>
+                    <rightvalue>US</rightvalue>
+                    <valuetype>String</valuetype>
+                  </next_condition>
+                </condition>
+                <true_step>Closed US Output</true_step>
+                <false_step>Status Switch</false_step>
+              </step>
+              <step>
+                <name>Status Switch</name>
+                <type>SwitchCase</type>
+                <field_name>status</field_name>
+                <case><value>In Progress</value><target>In Progress Output</target></case>
+                <case><value>On Hold</value><target>On Hold Output</target></case>
+              </step>
+              <step>
+                <name>High Priority Pending Output</name><type>TextFileOutput</type>
+                <file><name>/path/to/csv/output_high_priority_pending.csv</name><separator>,</separator></file>
+              </step>
+              <step>
+                <name>Closed US Output</name><type>TextFileOutput</type>
+                <file><name>/path/to/csv/output_closed_us.csv</name><separator>,</separator></file>
+              </step>
+              <step>
+                <name>In Progress Output</name><type>TextFileOutput</type>
+                <file><name>/path/to/csv/output_in_progress.csv</name><separator>,</separator></file>
+              </step>
+              <step>
+                <name>On Hold Output</name><type>TextFileOutput</type>
+                <file><name>/path/to/csv/output_on_hold.csv</name><separator>,</separator></file>
+              </step>
+              <hop><from>CSV Input</from><to>Filter High Priority Pending</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Priority Pending</from><to>High Priority Pending Output</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Priority Pending</from><to>Filter Closed US</to><enabled>Y</enabled></hop>
+              <hop><from>Filter Closed US</from><to>Closed US Output</to><enabled>Y</enabled></hop>
+              <hop><from>Filter Closed US</from><to>Status Switch</to><enabled>Y</enabled></hop>
+              <hop><from>Status Switch</from><to>In Progress Output</to><enabled>Y</enabled></hop>
+              <hop><from>Status Switch</from><to>On Hold Output</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("Complex_Conditional_Routing_MultiFields", def.name);
+        assertEquals(8, def.steps.size());
+        assertEquals(7, def.hops.size());
+
+        // CsvInput: <file><name> format, schema [id, status, priority, region]
+        StepDefinition csv = def.steps.stream().filter(s -> "CSV Input".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("CsvInput", csv.type);
+        assertEquals("/path/to/csv/input_complex.csv", csv.params.get("filePath"));
+        assertEquals("true", csv.params.get("hasHeader"));
+
+        // Filter High Priority Pending: picks up FIRST condition (priority=High), explicit routing
+        StepDefinition f1 = def.steps.stream()
+                .filter(s -> "Filter High Priority Pending".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("FilterRows", f1.type);
+        assertEquals("2",                           f1.params.get("column"),
+                "priority is index 2 in [id, status, priority, region]");
+        assertEquals("EQ",                          f1.params.get("operator"));
+        assertEquals("High",                        f1.params.get("value"));
+        assertEquals("High Priority Pending Output", f1.params.get("trueStep"));
+        assertEquals("Filter Closed US",            f1.params.get("falseStep"));
+
+        // Filter Closed US: picks up FIRST condition (status=Closed), explicit routing
+        StepDefinition f2 = def.steps.stream()
+                .filter(s -> "Filter Closed US".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("FilterRows", f2.type);
+        assertEquals("1",              f2.params.get("column"),
+                "status is index 1 in [id, status, priority, region]");
+        assertEquals("EQ",             f2.params.get("operator"));
+        assertEquals("Closed",         f2.params.get("value"));
+        assertEquals("Closed US Output", f2.params.get("trueStep"));
+        assertEquals("Status Switch",  f2.params.get("falseStep"));
+
+        // SwitchCase: status is index 1, two named cases, no default
+        StepDefinition sw = def.steps.stream()
+                .filter(s -> "Status Switch".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("SwitchCase", sw.type);
+        assertEquals("1",                   sw.params.get("column"),
+                "status is index 1 in [id, status, priority, region]");
+        assertEquals("In Progress Output",  sw.params.get("case.In Progress"));
+        assertEquals("On Hold Output",      sw.params.get("case.On Hold"));
+        assertNull(sw.params.get("defaultStep"), "no empty <value/> → no defaultStep");
+
+        // All four output sinks present
+        long outputCount = def.steps.stream().filter(s -> "TextFileOutput".equals(s.type)).count();
+        assertEquals(4, outputCount);
+        assertEquals("/path/to/csv/output_high_priority_pending.csv",
+                def.steps.stream().filter(s -> "High Priority Pending Output".equals(s.id))
+                        .findFirst().orElseThrow().params.get("filePath"));
+    }
+
+    @Test
     void switchCase_withDefaultStep_parsedCorrectly() throws Exception {
         // Default case: empty <value/> → maps to defaultStep param
         String ktr = """

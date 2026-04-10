@@ -91,6 +91,10 @@ public final class StepRegistry {
         r.register("InsertUpdate",         InsertUpdateStep.class);
         r.register("Delete",               DeleteStep.class);
         r.register("ExecSQL",              ExecSQLStep.class);
+        r.register("ScriptValueMod",       ScriptValueModStep.class);
+        r.register("UserDefinedJavaClass", UserDefinedJavaClassStep.class);
+        r.register("Formula",              FormulaStep.class);
+        r.register("MetaInject",           MetaInjectStep.class);
 
         // --- Pattern B: blocking steps ---
         r.register("SortRows",             SortRowsStep.class);

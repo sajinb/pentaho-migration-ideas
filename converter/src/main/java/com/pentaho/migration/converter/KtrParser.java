@@ -281,6 +281,8 @@ public final class KtrParser {
                                                                           fieldSchemas, upstreamOf);
             case "Calculator"              -> computeCalculatorOutputSchema(el, stepName,
                                                                              fieldSchemas, upstreamOf);
+            case "ScriptValueMod"          -> computeScriptOutputSchema(el, stepName,
+                                                                         fieldSchemas, upstreamOf);
             default -> null;
         };
     }
@@ -362,6 +364,43 @@ public final class KtrParser {
         List<String> schema = upSchema != null ? new ArrayList<>(upSchema) : new ArrayList<>();
         schema.add(newField);
         return schema;
+    }
+
+    /**
+     * ScriptValueMod output = upstream schema + [new output field names from &lt;fields&gt;].
+     * In-place updates (field names that already exist upstream) do not extend the schema.
+     */
+    private static List<String> computeScriptOutputSchema(Element el, String stepName,
+                                                            Map<String, List<String>> fieldSchemas,
+                                                            Map<String, String> upstreamOf) {
+        String up = upstreamOf.get(stepName);
+        List<String> upSchema = up != null ? fieldSchemas.get(up) : null;
+        List<String> schema   = upSchema != null ? new ArrayList<>(upSchema) : new ArrayList<>();
+
+        // Output fields defined directly under the step's <fields> element
+        NodeList children = el.getChildNodes();
+        Element outputFieldsEl = null;
+        for (int i = 0; i < children.getLength(); i++) {
+            if (children.item(i) instanceof Element child) {
+                String nodeName = child.getLocalName() != null ? child.getLocalName() : child.getNodeName();
+                if ("fields".equals(nodeName)) { outputFieldsEl = child; break; }
+            }
+        }
+        if (outputFieldsEl == null) {
+            NodeList all = el.getElementsByTagName("fields");
+            if (all.getLength() > 0) outputFieldsEl = (Element) all.item(0);
+        }
+
+        if (outputFieldsEl != null) {
+            NodeList fieldEls = outputFieldsEl.getElementsByTagName("field");
+            for (int i = 0; i < fieldEls.getLength(); i++) {
+                String name = text((Element) fieldEls.item(i), "name");
+                if (name != null && !name.isBlank() && !schema.contains(name)) {
+                    schema.add(name);
+                }
+            }
+        }
+        return schema.isEmpty() ? null : schema;
     }
 
     /**
@@ -452,6 +491,12 @@ public final class KtrParser {
                 // Resolve fieldA / fieldB (column names) to colA / colB (0-based indices).
                 resolveToIndex(sd.params, "fieldA", "colA", sd.id, upstreamOf, fieldSchemas);
                 resolveToIndex(sd.params, "fieldB", "colB", sd.id, upstreamOf, fieldSchemas);
+            } else if ("ScriptValueMod".equals(sd.type)) {
+                // Inject upstream field names so ScriptValueModStep can expose them as JS variables.
+                List<String> upSchema = findUpstreamSchema(sd.id, upstreamOf, fieldSchemas);
+                if (upSchema != null) {
+                    sd.params.put("fieldNames", String.join(",", upSchema));
+                }
             }
 
             steps.add(sd);

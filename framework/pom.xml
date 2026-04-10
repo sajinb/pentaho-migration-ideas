@@ -40,6 +40,24 @@
             <version>0.2.20</version>
         </dependency>
 
+        <!-- Phase 3: Mozilla Rhino — JavaScript engine for ScriptValueModStep -->
+        <dependency>
+            <groupId>org.mozilla</groupId>
+            <artifactId>rhino</artifactId>
+        </dependency>
+
+        <!-- Phase 3: Janino — runtime Java compilation for UserDefinedJavaClassStep -->
+        <dependency>
+            <groupId>org.codehaus.janino</groupId>
+            <artifactId>janino</artifactId>
+        </dependency>
+
+        <!-- Phase 3: Jakarta Mail — SMTP sending for MailEntry -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>angus-mail</artifactId>
+        </dependency>
+
         <!-- Test dependencies (versions managed by Spring Boot BOM via parent) -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -57,6 +75,13 @@
             <groupId>org.apache.sshd</groupId>
             <artifactId>sshd-sftp</artifactId>
             <version>2.13.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Phase 3 test: embedded SMTP for MailEntry tests -->
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail-junit5</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

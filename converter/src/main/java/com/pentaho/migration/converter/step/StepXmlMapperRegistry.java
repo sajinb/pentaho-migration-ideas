@@ -39,6 +39,7 @@ public final class StepXmlMapperRegistry {
         r.register("MemoryGroupBy",       new GroupByMapper());
         r.register("Formula",             new FormulaMapper());
         r.register("Calculator",          new CalculatorMapper());
+        r.register("ScriptValueMod",      new ScriptValueModMapper());
         return r;
     }
 }

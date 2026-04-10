@@ -40,6 +40,7 @@ public final class StepXmlMapperRegistry {
         r.register("Formula",             new FormulaMapper());
         r.register("Calculator",          new CalculatorMapper());
         r.register("ScriptValueMod",      new ScriptValueModMapper());
+        r.register("SwitchCase",          new SwitchCaseMapper());
         return r;
     }
 }

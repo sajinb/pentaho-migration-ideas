@@ -297,7 +297,8 @@ public final class KtrParser {
         return switch (stepType) {
             // Pass-through steps: output schema == upstream schema
             case "SortRows", "FilterRows", "Unique", "UniqueRowsByHashSet",
-                 "BlockingStep", "Normaliser", "WriteToLog", "SelectValues" -> {
+                 "BlockingStep", "Normaliser", "WriteToLog", "SelectValues",
+                 "SwitchCase" -> {
                 String up = upstreamOf.get(stepName);
                 yield up != null ? fieldSchemas.get(up) : null;
             }
@@ -542,6 +543,16 @@ public final class KtrParser {
                 List<String> upSchema = findUpstreamSchema(sd.id, upstreamOf, fieldSchemas);
                 if (upSchema != null) {
                     sd.params.put("fieldNames", String.join(",", upSchema));
+                }
+            } else if ("SwitchCase".equals(sd.type)) {
+                // Resolve field_name → column (0-based index) using upstream schema.
+                String fn = sd.params.get("field_name");
+                if (fn != null && !isInteger(fn)) {
+                    List<String> schema = findUpstreamSchema(sd.id, upstreamOf, fieldSchemas);
+                    if (schema != null) {
+                        int idx = schema.indexOf(fn);
+                        if (idx >= 0) sd.params.put("column", String.valueOf(idx));
+                    }
                 }
             }
 

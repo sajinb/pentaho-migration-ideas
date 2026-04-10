@@ -581,4 +581,116 @@ class KtrParserTest {
         StepDefinition blacklistJoin = def.steps.stream().filter(s -> "Merge User-Blacklist".equals(s.id)).findFirst().orElseThrow();
         assertEquals("LEFT OUTER", blacklistJoin.params.get("joinType"));
     }
+
+    // -------------------------------------------------------------------------
+    // SwitchCase dynamic routing
+    // -------------------------------------------------------------------------
+
+    @Test
+    void switchCase_dynamicRoutingKtr_parsedCorrectly() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation xmlns="http://www.pentaho.com/kettle/transformation/">
+              <info><name>Dynamic_Routing_By_Status</name></info>
+              <step>
+                <name>CSV Input</name><type>CsvInput</type>
+                <file><name>/path/input_status.csv</name></file>
+                <content><separator>,</separator><header>Y</header></content>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>name</name></field>
+                  <field><name>status</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Status Switch</name><type>SwitchCase</type>
+                <field_name>status</field_name>
+                <case><value>New</value><target>New Status Output</target></case>
+                <case><value>In Progress</value><target>In Progress Output</target></case>
+                <case><value>Closed</value><target>Closed Status Output</target></case>
+              </step>
+              <step>
+                <name>New Status Output</name><type>TextFileOutput</type>
+                <file><name>/path/output_new.csv</name></file>
+              </step>
+              <step>
+                <name>In Progress Output</name><type>TextFileOutput</type>
+                <file><name>/path/output_inprogress.csv</name></file>
+              </step>
+              <step>
+                <name>Closed Status Output</name><type>TextFileOutput</type>
+                <file><name>/path/output_closed.csv</name></file>
+              </step>
+              <hop><from>CSV Input</from><to>Status Switch</to><enabled>Y</enabled></hop>
+              <hop><from>Status Switch</from><to>New Status Output</to><enabled>Y</enabled></hop>
+              <hop><from>Status Switch</from><to>In Progress Output</to><enabled>Y</enabled></hop>
+              <hop><from>Status Switch</from><to>Closed Status Output</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("Dynamic_Routing_By_Status", def.name);
+        assertEquals(5, def.steps.size());
+        assertEquals(4, def.hops.size());
+
+        // CsvInput: <file><name> format + schema
+        StepDefinition csv = def.steps.get(0);
+        assertEquals("CsvInput",              csv.type);
+        assertEquals("/path/input_status.csv", csv.params.get("filePath"));
+
+        // SwitchCase: field resolved to column index 2, all case.VALUE entries present
+        StepDefinition sw = def.steps.get(1);
+        assertEquals("SwitchCase", sw.type);
+        assertEquals("2",                     sw.params.get("column"),
+                "status is the 3rd field (index 2) → column should be 2");
+        assertEquals("New Status Output",     sw.params.get("case.New"));
+        assertEquals("In Progress Output",    sw.params.get("case.In Progress"));
+        assertEquals("Closed Status Output",  sw.params.get("case.Closed"));
+        assertNull(sw.params.get("defaultStep"), "no default case defined");
+
+        // Three TextFileOutput sinks
+        long outputCount = def.steps.stream()
+                .filter(s -> "TextFileOutput".equals(s.type)).count();
+        assertEquals(3, outputCount);
+    }
+
+    @Test
+    void switchCase_withDefaultStep_parsedCorrectly() throws Exception {
+        // Default case: empty <value/> → maps to defaultStep param
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>switch_default</name></info>
+              <step>
+                <name>src</name><type>CsvInput</type>
+                <filename>/data/in.csv</filename>
+                <fields>
+                  <field><name>category</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>sw</name><type>SwitchCase</type>
+                <field_name>category</field_name>
+                <case><value>A</value><target>Out A</target></case>
+                <case><value/><target>Out Default</target></case>
+              </step>
+              <step><name>Out A</name><type>Dummy</type></step>
+              <step><name>Out Default</name><type>Dummy</type></step>
+              <order>
+                <hop><from>src</from><to>sw</to><enabled>Y</enabled></hop>
+                <hop><from>sw</from><to>Out A</to><enabled>Y</enabled></hop>
+                <hop><from>sw</from><to>Out Default</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        StepDefinition sw = def.steps.stream().filter(s -> "sw".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("SwitchCase",  sw.type);
+        assertEquals("0",           sw.params.get("column"), "category is first field → index 0");
+        assertEquals("Out A",       sw.params.get("case.A"));
+        assertEquals("Out Default", sw.params.get("defaultStep"));
+    }
 }

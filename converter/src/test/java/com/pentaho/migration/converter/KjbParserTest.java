@@ -329,4 +329,80 @@ class KjbParserTest {
         assertEquals("Run Transform2", def.hops.get(1).to);
         assertEquals("Run Transform3", def.hops.get(2).to);
     }
+
+    // -------------------------------------------------------------------------
+    // NonLinear_Orchestration_Job: fan-out + fan-in + independent branch
+    // -------------------------------------------------------------------------
+
+    @Test
+    void nonLinearOrchestration_fanOutFanIn_parsedCorrectly() throws Exception {
+        // Topology: Start → A (parallel), Start → B (parallel), Start → D (independent)
+        //           A → C (fan-in), B → C (fan-in)
+        // The parser just captures entries and hops; the engine handles execution semantics.
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job xmlns="http://www.pentaho.com/kettle/job/">
+              <name>NonLinear_Orchestration_Job</name>
+              <entries>
+                <entry><name>Start</name><type>START</type></entry>
+                <entry>
+                  <name>Run TransformA</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/TransformA.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Run TransformB</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/TransformB.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Run TransformC</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/TransformC.ktr</filename>
+                </entry>
+                <entry>
+                  <name>Run TransformD</name>
+                  <type>Transformation</type>
+                  <filename>/path/to/TransformD.ktr</filename>
+                </entry>
+              </entries>
+              <hops>
+                <hop><from>Start</from><to>Run TransformA</to><enabled>Y</enabled></hop>
+                <hop><from>Start</from><to>Run TransformB</to><enabled>Y</enabled></hop>
+                <hop><from>Run TransformA</from><to>Run TransformC</to><enabled>Y</enabled></hop>
+                <hop><from>Run TransformB</from><to>Run TransformC</to><enabled>Y</enabled></hop>
+                <hop><from>Start</from><to>Run TransformD</to><enabled>Y</enabled></hop>
+              </hops>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertEquals("NonLinear_Orchestration_Job", def.name);
+        assertEquals(5, def.entries.size());
+        assertEquals(5, def.hops.size());
+
+        // All transformation entries normalised correctly
+        assertEquals("Start",             def.entries.get(0).type);
+        assertEquals("RunTransformation", def.entries.get(1).type);
+        assertEquals("/path/to/TransformA.yaml", def.entries.get(1).params.get("transformationPath"));
+        assertEquals("RunTransformation", def.entries.get(2).type);
+        assertEquals("/path/to/TransformB.yaml", def.entries.get(2).params.get("transformationPath"));
+        assertEquals("RunTransformation", def.entries.get(3).type);
+        assertEquals("/path/to/TransformC.yaml", def.entries.get(3).params.get("transformationPath"));
+        assertEquals("RunTransformation", def.entries.get(4).type);
+        assertEquals("/path/to/TransformD.yaml", def.entries.get(4).params.get("transformationPath"));
+
+        // Fan-out from Start: 3 outgoing hops
+        long fromStart = def.hops.stream().filter(h -> "Start".equals(h.from)).count();
+        assertEquals(3, fromStart, "Start should have 3 outgoing hops (A, B, D)");
+
+        // Fan-in to C: 2 incoming hops
+        long toC = def.hops.stream().filter(h -> "Run TransformC".equals(h.to)).count();
+        assertEquals(2, toC, "TransformC should have 2 incoming hops (from A and from B)");
+
+        // D is independent: 1 incoming hop (from Start), no outgoing hops
+        long fromD = def.hops.stream().filter(h -> "Run TransformD".equals(h.from)).count();
+        assertEquals(0, fromD, "TransformD should have no outgoing hops");
+    }
 }

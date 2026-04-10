@@ -270,8 +270,75 @@ class TransformationExecutorTest {
     }
 
     // -------------------------------------------------------------------------
-    // 8. MemoryGroupBy aggregation
+    // 9. Non-linear job: parallel fan-out + fan-in + independent branch
     // -------------------------------------------------------------------------
+
+    @Test
+    void nonLinearJob_parallelFanOutAndFanIn() throws Exception {
+        // Topology:
+        //   Start ──► Run TransformA ──┐
+        //         ├──► Run TransformB ─┴──► Run TransformC   (fan-in: waits for both)
+        //         └──► Run TransformD  (independent)
+        //
+        // Expected: A and B run concurrently; C runs ONCE after BOTH complete;
+        //           D runs independently in parallel with A/B/C.
+
+        // Thread-safe list records the exact execution order
+        List<String> executionOrder = Collections.synchronizedList(new ArrayList<>());
+
+        // Registry using factories so we can intercept execution and record order.
+        // RunTransformation entries just record their name and return success —
+        // no actual YAML file needed.
+        JobEntryRegistry registry = JobEntryRegistry.withDefaults();
+        for (String entryName : List.of("Run TransformA", "Run TransformB",
+                                         "Run TransformC", "Run TransformD")) {
+            final String name = entryName;
+            registry.registerFactory("Track_" + entryName, params -> ctx -> {
+                executionOrder.add(name);
+                return true;
+            });
+        }
+
+        JobDefinition jDef = new JobDefinition();
+        jDef.name    = "NonLinear_Orchestration_Job";
+        jDef.entries = List.of(
+            entry("Start",           "Start",               Map.of()),
+            entry("Run TransformA",  "Track_Run TransformA", Map.of()),
+            entry("Run TransformB",  "Track_Run TransformB", Map.of()),
+            entry("Run TransformC",  "Track_Run TransformC", Map.of()),
+            entry("Run TransformD",  "Track_Run TransformD", Map.of())
+        );
+        jDef.hops = List.of(
+            entryHop("Start",          "Run TransformA", "success"),
+            entryHop("Start",          "Run TransformB", "success"),
+            entryHop("Start",          "Run TransformD", "success"),
+            entryHop("Run TransformA", "Run TransformC", "success"),
+            entryHop("Run TransformB", "Run TransformC", "success")
+        );
+
+        boolean result = new JobExecutor(registry).execute(jDef);
+
+        assertTrue(result, "Job should complete successfully");
+
+        // C must appear exactly once (fan-in: not duplicated by each predecessor branch)
+        assertEquals(1, Collections.frequency(executionOrder, "Run TransformC"),
+                "TransformC must run exactly once, not once per predecessor branch");
+
+        // A, B, D each run exactly once
+        assertEquals(1, Collections.frequency(executionOrder, "Run TransformA"));
+        assertEquals(1, Collections.frequency(executionOrder, "Run TransformB"));
+        assertEquals(1, Collections.frequency(executionOrder, "Run TransformD"));
+
+        // C must come after both A and B (fan-in ordering guarantee)
+        int idxA = executionOrder.indexOf("Run TransformA");
+        int idxB = executionOrder.indexOf("Run TransformB");
+        int idxC = executionOrder.indexOf("Run TransformC");
+        assertTrue(idxC > idxA, "TransformC must execute after TransformA completes");
+        assertTrue(idxC > idxB, "TransformC must execute after TransformB completes");
+
+        // Total: A + B + C + D = 4 executions (Start entry records nothing)
+        assertEquals(4, executionOrder.size());
+    }
 
     @Test
     void memoryGroupByStep() throws Exception {

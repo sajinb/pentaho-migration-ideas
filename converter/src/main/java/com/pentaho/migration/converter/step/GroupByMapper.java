@@ -55,13 +55,17 @@ public final class GroupByMapper implements StepXmlMapper {
         }
         if (!groupCols.isEmpty()) p.put("groupColumns", String.join(",", groupCols));
 
-        // ── Aggregate definitions ────────────────────────────────────────────
+        // ── Aggregate definitions ─────────────────────────────────────────────
+        // Two formats exist depending on Pentaho version:
+        //   Old: <fields><field><aggregate>out_name</aggregate><subject>col</subject><type>SUM</type></field></fields>
+        //   New: <aggregates><aggregate><name>out_name</name><subject>col</subject><type>SUM</type></aggregate></aggregates>
         List<String> aggCols  = new ArrayList<>();
         List<String> aggFns   = new ArrayList<>();
         List<String> aggNames = new ArrayList<>();
 
         NodeList fieldsEls = e.getElementsByTagName("fields");
         if (fieldsEls.getLength() > 0) {
+            // Old format
             Element fields = (Element) fieldsEls.item(0);
             NodeList fieldEls = fields.getElementsByTagName("field");
             for (int i = 0; i < fieldEls.getLength(); i++) {
@@ -72,6 +76,22 @@ public final class GroupByMapper implements StepXmlMapper {
                 if (subject != null && !subject.isBlank()) aggCols.add(subject);
                 if (fn      != null && !fn.isBlank())      aggFns.add(fn.toUpperCase());
                 if (aggName != null && !aggName.isBlank()) aggNames.add(aggName);
+            }
+        } else {
+            // New format: <aggregates>/<aggregate>
+            NodeList aggContainers = e.getElementsByTagName("aggregates");
+            if (aggContainers.getLength() > 0) {
+                Element aggs = (Element) aggContainers.item(0);
+                NodeList aggEls = aggs.getElementsByTagName("aggregate");
+                for (int i = 0; i < aggEls.getLength(); i++) {
+                    Element agg = (Element) aggEls.item(i);
+                    String aggName = text(agg, "name");
+                    String subject = text(agg, "subject");
+                    String fn      = text(agg, "type");
+                    if (subject != null && !subject.isBlank()) aggCols.add(subject);
+                    if (fn      != null && !fn.isBlank())      aggFns.add(fn.toUpperCase());
+                    if (aggName != null && !aggName.isBlank()) aggNames.add(aggName);
+                }
             }
         }
         if (!aggCols.isEmpty())  p.put("aggColumns",   String.join(",", aggCols));

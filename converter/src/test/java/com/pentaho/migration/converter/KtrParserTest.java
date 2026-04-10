@@ -811,6 +811,139 @@ class KtrParserTest {
                         .findFirst().orElseThrow().params.get("filePath"));
     }
 
+    // -------------------------------------------------------------------------
+    // Blocking steps: TextFileInput → SortRows → GroupBy → FilterRows → output
+    // -------------------------------------------------------------------------
+
+    @Test
+    void blockingSteps_sortGroupFilter_parsedCorrectly() throws Exception {
+        // KTR: Read CSV (TextFileInput) → Sort Rows (SortRows) → Group By (GroupBy)
+        //      → Filter High Value Customers (FilterRows) → Write CSV + Discard Rows
+        //
+        // Key exercises:
+        //  - TextFileInput with <file><name>, flat <separator>/<header> on step
+        //  - SortRows with <sortfields>/<field> (not <sort_fields>)
+        //  - GroupBy with <aggregates>/<aggregate>/<name>/<subject>/<type> (new format)
+        //  - FilterRows with <leftvalue><name> and <rightvalue><value> wrapping
+        //  - Column index resolution across blocking step boundaries
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <name>read_sort_group_filter_write_csv</name>
+              <step>
+                <name>Read CSV</name>
+                <type>TextFileInput</type>
+                <file>
+                  <name>C:/test/input/input.csv</name>
+                </file>
+                <separator>,</separator>
+                <header>Y</header>
+                <fields>
+                  <field><name>customer_id</name><type>Integer</type></field>
+                  <field><name>tx_date</name><type>Date</type></field>
+                  <field><name>amount</name><type>Number</type></field>
+                </fields>
+              </step>
+              <step>
+                <name>Sort Rows</name>
+                <type>SortRows</type>
+                <sortfields>
+                  <field><name>customer_id</name><ascending>Y</ascending></field>
+                  <field><name>tx_date</name><ascending>Y</ascending></field>
+                </sortfields>
+              </step>
+              <step>
+                <name>Group By</name>
+                <type>GroupBy</type>
+                <group>
+                  <field><name>customer_id</name></field>
+                </group>
+                <aggregates>
+                  <aggregate>
+                    <name>total_amount</name>
+                    <subject>amount</subject>
+                    <type>SUM</type>
+                  </aggregate>
+                </aggregates>
+              </step>
+              <step>
+                <name>Filter High Value Customers</name>
+                <type>FilterRows</type>
+                <send_true_to>Write CSV</send_true_to>
+                <send_false_to>Discard Rows</send_false_to>
+                <condition>
+                  <leftvalue><name>total_amount</name></leftvalue>
+                  <function>GT</function>
+                  <rightvalue><value>50000</value></rightvalue>
+                </condition>
+              </step>
+              <step>
+                <name>Write CSV</name>
+                <type>TextFileOutput</type>
+                <file><name>C:/test/output/output.csv</name><header>Y</header></file>
+              </step>
+              <step>
+                <name>Discard Rows</name>
+                <type>Dummy</type>
+              </step>
+              <hop><from>Read CSV</from><to>Sort Rows</to><enabled>Y</enabled></hop>
+              <hop><from>Sort Rows</from><to>Group By</to><enabled>Y</enabled></hop>
+              <hop><from>Group By</from><to>Filter High Value Customers</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Value Customers</from><to>Write CSV</to><enabled>Y</enabled></hop>
+              <hop><from>Filter High Value Customers</from><to>Discard Rows</to><enabled>Y</enabled></hop>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("read_sort_group_filter_write_csv", def.name);
+        assertEquals(6, def.steps.size());
+        assertEquals(5, def.hops.size());
+
+        // ── TextFileInput ────────────────────────────────────────────────────
+        StepDefinition readCsv = def.steps.get(0);
+        assertEquals("TextFileInput", readCsv.type);
+        assertEquals("C:/test/input/input.csv", readCsv.params.get("filePath"));
+        assertEquals("true", readCsv.params.get("hasHeader"));
+
+        // ── SortRows: <sortfields>/<field> → columns resolved to indices ─────
+        // Schema: [customer_id=0, tx_date=1, amount=2]
+        StepDefinition sort = def.steps.get(1);
+        assertEquals("SortRows", sort.type);
+        assertEquals("0,1", sort.params.get("columns"),
+                "customer_id→0, tx_date→1 from TextFileInput schema");
+
+        // ── GroupBy: <aggregates>/<aggregate> new format ─────────────────────
+        StepDefinition groupBy = def.steps.get(2);
+        assertEquals("GroupBy", groupBy.type);
+        assertEquals("0",           groupBy.params.get("groupColumns"),
+                "customer_id is index 0");
+        assertEquals("2",           groupBy.params.get("aggColumns"),
+                "amount is index 2 — subject column resolved against upstream schema");
+        assertEquals("SUM",         groupBy.params.get("aggFunctions"));
+        assertEquals("total_amount", groupBy.params.get("aggNames"),
+                "output column name from <aggregate>/<name>");
+
+        // ── FilterRows: column resolved against GroupBy output schema ─────────
+        // GroupBy output schema: [customer_id=0, total_amount=1]
+        StepDefinition filter = def.steps.get(3);
+        assertEquals("FilterRows", filter.type);
+        assertEquals("1",        filter.params.get("column"),
+                "total_amount is index 1 in GroupBy output [customer_id, total_amount]");
+        assertEquals("GT",       filter.params.get("operator"));
+        assertEquals("50000",    filter.params.get("value"));
+        assertEquals("Write CSV",    filter.params.get("trueStep"));
+        assertEquals("Discard Rows", filter.params.get("falseStep"));
+
+        // ── Output and Dummy ─────────────────────────────────────────────────
+        StepDefinition writeOut = def.steps.get(4);
+        assertEquals("TextFileOutput", writeOut.type);
+        assertEquals("C:/test/output/output.csv", writeOut.params.get("filePath"));
+
+        StepDefinition discard = def.steps.get(5);
+        assertEquals("Dummy", discard.type);
+    }
+
     @Test
     void switchCase_withDefaultStep_parsedCorrectly() throws Exception {
         // Default case: empty <value/> → maps to defaultStep param

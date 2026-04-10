@@ -349,6 +349,8 @@ public final class KtrParser {
             }
         }
 
+        // Aggregate output names: old format <fields>/<field>/<aggregate>,
+        // new format <aggregates>/<aggregate>/<name>
         NodeList fieldsEls = el.getElementsByTagName("fields");
         if (fieldsEls.getLength() > 0) {
             Element fields = (Element) fieldsEls.item(0);
@@ -356,6 +358,16 @@ public final class KtrParser {
             for (int i = 0; i < fieldEls.getLength(); i++) {
                 String aggName = text((Element) fieldEls.item(i), "aggregate");
                 if (aggName != null && !aggName.isBlank()) schema.add(aggName);
+            }
+        } else {
+            NodeList aggContainers = el.getElementsByTagName("aggregates");
+            if (aggContainers.getLength() > 0) {
+                Element aggs = (Element) aggContainers.item(0);
+                NodeList aggEls = aggs.getElementsByTagName("aggregate");
+                for (int i = 0; i < aggEls.getLength(); i++) {
+                    String aggName = text((Element) aggEls.item(i), "name");
+                    if (aggName != null && !aggName.isBlank()) schema.add(aggName);
+                }
             }
         }
 

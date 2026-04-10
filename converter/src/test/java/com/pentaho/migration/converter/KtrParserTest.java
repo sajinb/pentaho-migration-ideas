@@ -849,4 +849,157 @@ class KtrParserTest {
         assertEquals("Out A",       sw.params.get("case.A"));
         assertEquals("Out Default", sw.params.get("defaultStep"));
     }
+
+    // -------------------------------------------------------------------------
+    // Mapping (Sub-transformation) — KTR calling another KTR
+    // -------------------------------------------------------------------------
+
+    @Test
+    void mapping_flatFilename_parsedCorrectly() throws Exception {
+        // Format A: <filename> directly on the step (Pentaho 7.x)
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>parent_ktr</name></info>
+              <step>
+                <name>Read Input</name><type>CsvInput</type>
+                <filename>/data/input.csv</filename>
+                <fields><field><name>id</name></field><field><name>value</name></field></fields>
+              </step>
+              <step>
+                <name>Enrich Data</name>
+                <type>Mapping (Sub-transformation)</type>
+                <filename>transformations/enrich.ktr</filename>
+              </step>
+              <step>
+                <name>Write Output</name><type>TextFileOutput</type>
+                <file><name>/data/output.csv</name></file>
+              </step>
+              <order>
+                <hop><from>Read Input</from><to>Enrich Data</to><enabled>Y</enabled></hop>
+                <hop><from>Enrich Data</from><to>Write Output</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("parent_ktr", def.name);
+        assertEquals(3, def.steps.size());
+        assertEquals(2, def.hops.size());
+
+        StepDefinition mapping = def.steps.stream()
+                .filter(s -> "Enrich Data".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("Mapping", mapping.type);
+        assertEquals("transformations/enrich.yaml", mapping.params.get("transformationPath"),
+                ".ktr extension should be replaced with .yaml");
+    }
+
+    @Test
+    void mapping_specificationMethodFilename_parsedCorrectly() throws Exception {
+        // Format B: <specification_method>filename</specification_method> + <filename> (Pentaho 8.x/9.x)
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>parent_v9</name></info>
+              <step>
+                <name>src</name><type>CsvInput</type>
+                <filename>/data/in.csv</filename>
+                <fields><field><name>key</name></field></fields>
+              </step>
+              <step>
+                <name>Sub Transform</name>
+                <type>Mapping (Sub-transformation)</type>
+                <specification_method>filename</specification_method>
+                <filename>/opt/pentaho/transformations/lookup.ktr</filename>
+              </step>
+              <order>
+                <hop><from>src</from><to>Sub Transform</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        StepDefinition mapping = def.steps.stream()
+                .filter(s -> "Sub Transform".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("Mapping", mapping.type);
+        assertEquals("/opt/pentaho/transformations/lookup.yaml",
+                mapping.params.get("transformationPath"));
+    }
+
+    @Test
+    void mapping_repositoryReference_parsedCorrectly() throws Exception {
+        // Format C: <specification_method>rep_by_name</specification_method> + <directory> + <trans_name>
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>parent_repo</name></info>
+              <step>
+                <name>src</name><type>CsvInput</type>
+                <filename>/data/in.csv</filename>
+                <fields><field><name>key</name></field></fields>
+              </step>
+              <step>
+                <name>Repo Sub</name>
+                <type>Mapping (Sub-transformation)</type>
+                <specification_method>rep_by_name</specification_method>
+                <trans_name>customer_enrich</trans_name>
+                <directory>/transformations/customer</directory>
+              </step>
+              <order>
+                <hop><from>src</from><to>Repo Sub</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        StepDefinition mapping = def.steps.stream()
+                .filter(s -> "Repo Sub".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("Mapping", mapping.type);
+        assertEquals("/transformations/customer/customer_enrich.yaml",
+                mapping.params.get("transformationPath"),
+                "repository reference: directory/trans_name.yaml");
+    }
+
+    @Test
+    void mapping_childKtrWithMappingInput_parsedCorrectly() throws Exception {
+        // A CHILD KTR contains MappingInput → [processing] → MappingOutput.
+        // The converter must parse MappingInput/MappingOutput as recognised step types (not Default).
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>child_enrichment</name></info>
+              <step>
+                <name>Input Port</name>
+                <type>MappingInput</type>
+              </step>
+              <step>
+                <name>Sort by Key</name>
+                <type>SortRows</type>
+                <sort_fields>
+                  <field><name>key</name><ascending>Y</ascending></field>
+                </sort_fields>
+              </step>
+              <step>
+                <name>Output Port</name>
+                <type>MappingOutput</type>
+              </step>
+              <order>
+                <hop><from>Input Port</from><to>Sort by Key</to><enabled>Y</enabled></hop>
+                <hop><from>Sort by Key</from><to>Output Port</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertEquals("child_enrichment", def.name);
+        assertEquals(3, def.steps.size());
+
+        assertEquals("MappingInput",  def.steps.get(0).type);
+        assertEquals("SortRows",      def.steps.get(1).type);
+        assertEquals("MappingOutput", def.steps.get(2).type);
+    }
 }

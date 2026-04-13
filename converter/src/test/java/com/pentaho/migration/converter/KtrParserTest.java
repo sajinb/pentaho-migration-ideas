@@ -1485,4 +1485,117 @@ class KtrParserTest {
         assertEquals("0", enrich.params.get("keyLookupCols"),  "ref_id=col0 in lookup");
         assertEquals("1", enrich.params.get("valueFieldCols"), "category=col1 in lookup");
     }
+
+    // -------------------------------------------------------------------------
+    // StreamLookup fallback schema when lookup CsvInput has no <fields> in KTR
+    // -------------------------------------------------------------------------
+
+    @Test
+    void streamLookup_noLookupFieldSchema_fallsBackToSyntheticSchema() throws Exception {
+        // The lookup CsvInput has NO <fields>/<field> declarations — common when the CSV
+        // schema is auto-detected in Pentaho.  The StreamLookup mapper can still infer
+        // column positions from its own <key>/<field> and <value>/<name> elements:
+        //   synthetic schema = [key_lookup_fields..., value_fields...]
+        //   → keyLookupCols = "0", valueFieldCols = "1,2"
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>lookup_no_schema</name></info>
+              <step>
+                <name>Main</name>
+                <type>CSVInput</type>
+                <filename>/data/main.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>order_key</name></field>
+                  <field><name>amount</name></field>
+                </fields>
+              </step>
+              <!-- Lookup source has NO <fields> declarations -->
+              <step>
+                <name>LookupSrc</name>
+                <type>CSVInput</type>
+                <filename>/data/lookup.csv</filename>
+                <header>Y</header>
+              </step>
+              <step>
+                <name>Enrich</name>
+                <type>StreamLookup</type>
+                <from>LookupSrc</from>
+                <lookup>
+                  <key><name>order_key</name><field>id</field></key>
+                  <value><name>country</name><rename>country</rename></value>
+                  <value><name>segment</name><rename>segment</rename></value>
+                </lookup>
+              </step>
+              <order>
+                <hop><from>Main</from><to>Enrich</to><enabled>Y</enabled></hop>
+                <hop><from>LookupSrc</from><to>Enrich</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+        StepDefinition enrich = def.steps.stream()
+                .filter(s -> "Enrich".equals(s.id)).findFirst().orElseThrow();
+
+        // keyStreamCols: order_key is at index 0 in Main schema
+        assertEquals("0", enrich.params.get("keyStreamCols"));
+        // keyLookupCols: synthetic schema = [id, country, segment] → id at index 0
+        assertEquals("0", enrich.params.get("keyLookupCols"),
+                "Fallback schema: key field 'id' must be at index 0");
+        // valueFieldCols: country at index 1, segment at index 2 in synthetic schema
+        assertEquals("1,2", enrich.params.get("valueFieldCols"),
+                "Fallback schema: country=1, segment=2");
+    }
+
+    // -------------------------------------------------------------------------
+    // TextFileOutput — outputFields resolved to outputCols
+    // -------------------------------------------------------------------------
+
+    @Test
+    void textFileOutput_outputFields_resolvedToColumnIndices() throws Exception {
+        // The TextFileOutput <fields> section selects a subset of columns and gives the output
+        // its expected schema. The parser must resolve those names to 0-based indices so the
+        // step can write only those columns in the correct order.
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>select_output</name></info>
+              <step>
+                <name>Src</name>
+                <type>CSVInput</type>
+                <filename>/data/in.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>name</name></field>
+                  <field><name>country</name></field>
+                  <field><name>segment</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Out</name>
+                <type>TextFileOutput</type>
+                <file><name>/data/out.csv</name></file>
+                <fields>
+                  <field><name>country</name></field>
+                  <field><name>segment</name></field>
+                </fields>
+              </step>
+              <order>
+                <hop><from>Src</from><to>Out</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+        StepDefinition out = def.steps.stream()
+                .filter(s -> "Out".equals(s.id)).findFirst().orElseThrow();
+
+        // outputFields should be consumed and replaced with outputCols
+        assertNull(out.params.get("outputFields"), "outputFields must be replaced by outputCols");
+        assertEquals("2,3", out.params.get("outputCols"),
+                "country=col2, segment=col3 in upstream [id,name,country,segment]");
+    }
 }

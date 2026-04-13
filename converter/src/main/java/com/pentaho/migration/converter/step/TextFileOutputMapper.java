@@ -3,7 +3,9 @@ package com.pentaho.migration.converter.step;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static com.pentaho.migration.converter.step.XmlHelper.*;
@@ -30,6 +32,20 @@ public final class TextFileOutputMapper implements StepXmlMapper {
             filePath = child(e, "filename");
         }
         put(p, "filePath", filePath);
+
+        // <fields>/<field>/<name> — explicit output column list (order matters)
+        List<String> outputFields = new ArrayList<>();
+        NodeList fields = e.getElementsByTagName("fields");
+        if (fields.getLength() > 0) {
+            Element fieldsEl = (Element) fields.item(0);
+            NodeList fieldEls = fieldsEl.getElementsByTagName("field");
+            for (int i = 0; i < fieldEls.getLength(); i++) {
+                Element fieldEl = (Element) fieldEls.item(i);
+                String name = child(fieldEl, "name");
+                if (name != null && !name.isBlank()) outputFields.add(name);
+            }
+        }
+        if (!outputFields.isEmpty()) p.put("outputFields", String.join(",", outputFields));
 
         return p;
     }

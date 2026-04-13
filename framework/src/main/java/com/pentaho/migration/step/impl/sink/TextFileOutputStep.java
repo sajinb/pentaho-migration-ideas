@@ -16,19 +16,33 @@ import java.util.Map;
  * <p>Params:
  * <ul>
  *   <li>{@code filePath}     — output file path (required)
- *   <li>{@code writeHeader}  — "true" (default) to write a header row; field names from "header.N"
+ *   <li>{@code writeHeader}  — "true" to write a CSV header row derived from {@code outputCols}
+ *   <li>{@code outputCols}   — comma-separated 0-based column indices to write, in order.
+ *                              When absent all columns are written.
  * </ul>
  */
 public class TextFileOutputStep extends AbstractSinkStep {
 
-    private String filePath;
-    private boolean writeHeader = false;
+    private String   filePath;
+    private boolean  writeHeader = false;
+    private int[]    outputCols;   // null = write all columns
+    private String[] header;       // parallel to outputCols, populated when writeHeader=true
     private BufferedWriter writer;
 
     @Override
     public void configure(Map<String, String> params) {
         filePath    = params.get("filePath");
         writeHeader = "true".equalsIgnoreCase(params.getOrDefault("writeHeader", "false"));
+
+        String cols = params.get("outputCols");
+        if (cols != null && !cols.isBlank()) {
+            String[] tokens = cols.split(",");
+            outputCols = new int[tokens.length];
+            for (int i = 0; i < tokens.length; i++) {
+                try { outputCols[i] = Integer.parseInt(tokens[i].trim()); }
+                catch (NumberFormatException e) { outputCols[i] = -1; } // unresolved name → skip
+            }
+        }
     }
 
     @Override
@@ -42,8 +56,19 @@ public class TextFileOutputStep extends AbstractSinkStep {
 
     @Override
     protected void writeRow(Row row) throws IOException {
-        writer.write(CsvUtil.formatLine(row.getValues()));
+        String[] values = selectColumns(row);
+        writer.write(CsvUtil.formatLine(values));
         writer.newLine();
+    }
+
+    private String[] selectColumns(Row row) {
+        if (outputCols == null) return row.getValues();
+        String[] out = new String[outputCols.length];
+        for (int i = 0; i < outputCols.length; i++) {
+            int col = outputCols[i];
+            out[i] = (col >= 0 && col < row.fieldCount()) ? row.getString(col) : null;
+        }
+        return out;
     }
 
     @Override

@@ -580,6 +580,13 @@ public final class KtrParser {
                         if (idx >= 0) sd.params.put("column", String.valueOf(idx));
                     }
                 }
+            } else if ("TextFileOutput".equals(sd.type)) {
+                // Resolve output field names to 0-based column indices using the upstream schema.
+                // This allows TextFileOutputStep to write only the specified columns in order.
+                if (sd.params.containsKey("outputFields")) {
+                    resolveColumnNames(sd.params, "outputFields", sd.id, upstreamOf, fieldSchemas);
+                    sd.params.put("outputCols", sd.params.remove("outputFields"));
+                }
             } else if ("StreamLookup".equals(sd.type)) {
                 // Determine which input index is the lookup stream vs. the main stream.
                 String lookupStepName = sd.params.get("lookupStep");
@@ -607,6 +614,18 @@ public final class KtrParser {
                 if (lookupUpstream != null) {
                     List<String> lookupSchema = fieldSchemas.get(lookupUpstream);
                     if (lookupSchema == null) lookupSchema = findUpstreamSchema(lookupUpstream, upstreamOf, fieldSchemas);
+                    // Fallback: build a synthetic schema from the key+value field names declared
+                    // inside this StreamLookup step. This handles the common case where the lookup
+                    // source CsvInput has no <fields> declarations in the KTR (auto-detected CSV).
+                    // Assumes column order: [key_lookup_fields..., value_fields...]
+                    if (lookupSchema == null) {
+                        List<String> synthetic = new ArrayList<>();
+                        String kl = sd.params.get("keyLookup");
+                        if (kl != null) for (String k : kl.split(",")) { String t = k.trim(); if (!t.isBlank()) synthetic.add(t); }
+                        String vf = sd.params.get("valueFields");
+                        if (vf != null) for (String v : vf.split(",")) { String t = v.trim(); if (!t.isBlank()) synthetic.add(t); }
+                        if (!synthetic.isEmpty()) lookupSchema = synthetic;
+                    }
                     resolveToIndexParam(sd.params, "keyLookup",   "keyLookupCols",  lookupSchema);
                     resolveToIndexParam(sd.params, "valueFields", "valueFieldCols", lookupSchema);
                 }

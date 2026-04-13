@@ -43,9 +43,10 @@ public final class KjbParser {
         doc.getDocumentElement().normalize();
 
         JobDefinition def = new JobDefinition();
-        def.name    = extractName(doc);
-        def.entries = extractEntries(doc);
-        def.hops    = extractHops(doc);
+        def.name       = extractName(doc);
+        def.parameters = extractParameters(doc);
+        def.entries    = extractEntries(doc);
+        def.hops       = extractHops(doc);
         return def;
     }
 
@@ -60,6 +61,21 @@ public final class KjbParser {
             }
         }
         return "unnamed";
+    }
+
+    private Map<String, String> extractParameters(Document doc) {
+        Map<String, String> params = new HashMap<>();
+        // Parameters are in <job><parameters><parameter><name> / <default_value>
+        NodeList paramNodes = doc.getElementsByTagName("parameter");
+        for (int i = 0; i < paramNodes.getLength(); i++) {
+            Element el = (Element) paramNodes.item(i);
+            String name         = text(el, "name");
+            String defaultValue = text(el, "default_value");
+            if (name != null && !name.isBlank()) {
+                params.put(name, defaultValue != null ? defaultValue : "");
+            }
+        }
+        return params;
     }
 
     private List<EntryDefinition> extractEntries(Document doc) {

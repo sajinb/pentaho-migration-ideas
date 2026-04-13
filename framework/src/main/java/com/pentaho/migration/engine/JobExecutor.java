@@ -50,6 +50,10 @@ public final class JobExecutor {
 
     public boolean execute(JobDefinition def, Map<String, String> initialContext) throws Exception {
         Map<String, String> context = Collections.synchronizedMap(new HashMap<>(initialContext));
+        // Seed context with KJB parameter defaults; initialContext values take precedence
+        if (def.parameters != null) {
+            def.parameters.forEach(context::putIfAbsent);
+        }
 
         // ── 1. Build hop topology ──────────────────────────────────────────────
         Map<String, List<EntryHopDefinition>> incoming = new LinkedHashMap<>();

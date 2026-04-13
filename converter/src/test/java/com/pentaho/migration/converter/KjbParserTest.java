@@ -751,4 +751,66 @@ class KjbParserTest {
         assertEquals("Dummy", def.entries.get(2).type); // EVAL
         assertEquals("Dummy", def.entries.get(3).type); // MOVE_FILES
     }
+
+    // -------------------------------------------------------------------------
+    // KJB <parameters> section → def.parameters with defaults
+    // -------------------------------------------------------------------------
+
+    @Test
+    void kjbParameters_parsedIntoDefParametersMap() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>parameterised_job</name>
+              <parameters>
+                <parameter>
+                  <name>INPUT_CSV</name>
+                  <default_value>/data/input.csv</default_value>
+                  <description>Path to input CSV</description>
+                </parameter>
+                <parameter>
+                  <name>OUTPUT_CSV</name>
+                  <default_value>/data/output.csv</default_value>
+                  <description>Path to output CSV</description>
+                </parameter>
+                <parameter>
+                  <name>LOOKUP_CSV</name>
+                  <default_value></default_value>
+                  <description>Optional lookup table</description>
+                </parameter>
+              </parameters>
+              <entries>
+                <entry><name>START</name><type>SPECIAL</type><start>Y</start></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertNotNull(def.parameters, "parameters map must not be null");
+        assertEquals("/data/input.csv",  def.parameters.get("INPUT_CSV"));
+        assertEquals("/data/output.csv", def.parameters.get("OUTPUT_CSV"));
+        assertEquals("",                 def.parameters.get("LOOKUP_CSV"));
+        assertEquals(3, def.parameters.size());
+    }
+
+    @Test
+    void kjbNoParameters_parsedAsEmptyMap() throws Exception {
+        String kjb = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <job>
+              <name>no_params_job</name>
+              <entries>
+                <entry><name>START</name><type>SPECIAL</type><start>Y</start></entry>
+              </entries>
+              <hops/>
+            </job>
+            """;
+
+        JobDefinition def = parse(kjb);
+
+        assertNotNull(def.parameters, "parameters map must not be null even when absent");
+        assertTrue(def.parameters.isEmpty(), "parameters should be empty when no <parameters> section");
+    }
 }

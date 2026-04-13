@@ -33,6 +33,10 @@ public class TextFileOutputStep extends AbstractSinkStep {
 
     @Override
     protected void open() throws IOException {
+        if (filePath == null || filePath.isBlank())
+            throw new IOException(
+                    "TextFileOutput: 'filePath' param is null/blank — " +
+                    "check ${VAR} resolution or the KTR <file>/<name> configuration");
         writer = Files.newBufferedWriter(Paths.get(filePath));
     }
 

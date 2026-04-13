@@ -11,7 +11,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -60,6 +62,15 @@ public class RunTransformationEntry implements JobEntry {
             throw new IllegalStateException(
                     "Failed to parse transformation YAML '" + yamlPath.toAbsolutePath() + "': " + e.getMessage(), e);
         }
+
+        // Merge job-level context variables (e.g. KJB parameters) into the transformation's
+        // parameter map so ${VAR} tokens in step params resolve correctly.
+        // Infrastructure keys used by the engine itself are excluded.
+        if (def.parameters == null) def.parameters = new HashMap<>();
+        Set<String> infraKeys = Set.of("basePath");
+        context.forEach((k, v) -> {
+            if (!infraKeys.contains(k)) def.parameters.putIfAbsent(k, v);
+        });
 
         try {
             new TransformationExecutor(StepRegistry.withDefaults()).execute(def);

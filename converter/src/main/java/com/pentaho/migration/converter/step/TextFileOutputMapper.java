@@ -15,18 +15,21 @@ public final class TextFileOutputMapper implements StepXmlMapper {
     public Map<String, String> map(Element e) {
         Map<String, String> p = new HashMap<>();
 
-        // <file>/<name> holds the output path
+        // <file>/<name> holds the output path; <file>/<separator> and <file>/<header> hold config
+        String filePath = null;
         NodeList fileNodes = e.getElementsByTagName("file");
         if (fileNodes.getLength() > 0) {
             Element fileEl = (Element) fileNodes.item(0);
-            put(p, "filePath",    child(fileEl, "name"));
+            filePath = child(fileEl, "name");
             put(p, "separator",   child(fileEl, "separator", ","));
             String header = child(fileEl, "header", "Y");
             put(p, "writeHeader", yesNo(header));
-        } else {
-            // fallback — sometimes written directly on step
-            put(p, "filePath",    child(e, "filename"));
         }
+        // Fallback: top-level <filename> used when <file> has no <name>, or <file> is absent
+        if (filePath == null || filePath.isBlank()) {
+            filePath = child(e, "filename");
+        }
+        put(p, "filePath", filePath);
 
         return p;
     }

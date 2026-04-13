@@ -1491,6 +1491,141 @@ class KtrParserTest {
     // -------------------------------------------------------------------------
 
     @Test
+    void streamLookup_formatB_keystream_valuestream_parsedCorrectly() throws Exception {
+        // Real-world KTR format: flat <keystream>, <keylookup>, <valuestream> siblings
+        // (as opposed to the <lookup>/<key>/<value> container format).
+        // Lookup source has <fields> declared, so schema IS available for index resolution.
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>filter_lookup_sort</name></info>
+              <step>
+                <name>Read Input CSV</name>
+                <type>CsvInput</type>
+                <filename>${INPUT_CSV}</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>first_name</name></field>
+                  <field><name>last_name</name></field>
+                  <field><name>status</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Filter ACTIVE</name>
+                <type>FilterRows</type>
+                <send_true_to>Lookup Attributes</send_true_to>
+                <send_false_to></send_false_to>
+                <compare>
+                  <condition>
+                    <negated>N</negated>
+                    <leftvalue>status</leftvalue>
+                    <function>=</function>
+                    <rightvalue>ACTIVE</rightvalue>
+                  </condition>
+                </compare>
+              </step>
+              <step>
+                <name>Lookup Attributes</name>
+                <type>StreamLookup</type>
+                <keystream>id</keystream>
+                <keylookup>id</keylookup>
+                <lookupsteps>
+                  <lookupstep><name>Read Lookup CSV</name></lookupstep>
+                </lookupsteps>
+                <valuestream>
+                  <valuename>country</valuename>
+                  <value>country</value>
+                  <default></default>
+                  <type>String</type>
+                </valuestream>
+                <valuestream>
+                  <valuename>segment</valuename>
+                  <value>segment</value>
+                  <default></default>
+                  <type>String</type>
+                </valuestream>
+              </step>
+              <step>
+                <name>Read Lookup CSV</name>
+                <type>CsvInput</type>
+                <filename>${LOOKUP_CSV}</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>country</name></field>
+                  <field><name>segment</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Sort Rows</name>
+                <type>SortRows</type>
+                <fields>
+                  <field><name>last_name</name><ascending>Y</ascending></field>
+                  <field><name>first_name</name><ascending>Y</ascending></field>
+                </fields>
+              </step>
+              <step>
+                <name>Write Output CSV</name>
+                <type>TextFileOutput</type>
+                <filename>${OUTPUT_CSV}</filename>
+                <separator>,</separator>
+                <header>Y</header>
+                <file>
+                  <servlet_output>N</servlet_output>
+                </file>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>first_name</name></field>
+                  <field><name>last_name</name></field>
+                  <field><name>status</name></field>
+                  <field><name>country</name></field>
+                  <field><name>segment</name></field>
+                </fields>
+              </step>
+              <order>
+                <hop><from>Read Input CSV</from><to>Filter ACTIVE</to><enabled>Y</enabled></hop>
+                <hop><from>Filter ACTIVE</from><to>Lookup Attributes</to><enabled>Y</enabled></hop>
+                <hop><from>Lookup Attributes</from><to>Sort Rows</to><enabled>Y</enabled></hop>
+                <hop><from>Sort Rows</from><to>Write Output CSV</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        // StreamLookup — Format B params
+        StepDefinition lookup = def.steps.stream()
+                .filter(s -> "Lookup Attributes".equals(s.id)).findFirst().orElseThrow();
+
+        assertEquals("Read Lookup CSV", lookup.params.get("lookupStep"));
+        // keyStreamCols: "id" is at index 0 in [id,first_name,last_name,status] main schema
+        assertEquals("0", lookup.params.get("keyStreamCols"), "id=col0 in main stream");
+        // keyLookupCols: "id" is at index 0 in [id,country,segment] lookup schema
+        assertEquals("0", lookup.params.get("keyLookupCols"), "id=col0 in lookup stream");
+        // valueFieldCols: country=1, segment=2 in [id,country,segment] lookup schema
+        assertEquals("1,2", lookup.params.get("valueFieldCols"),
+                "country=col1, segment=col2 in lookup stream");
+
+        // TextFileOutput — outputCols from resolved <fields>
+        // StreamLookup output schema = [id,first_name,last_name,status,country,segment]
+        StepDefinition out = def.steps.stream()
+                .filter(s -> "Write Output CSV".equals(s.id)).findFirst().orElseThrow();
+
+        assertEquals("${OUTPUT_CSV}", out.params.get("filePath"));
+        assertEquals("true", out.params.get("writeHeader"));
+        assertEquals("0,1,2,3,4,5", out.params.get("outputCols"),
+                "All 6 fields resolved in correct order");
+        assertNull(out.params.get("outputFields"), "outputFields consumed, outputCols set");
+
+        // Synthetic hop injected for lookup stream
+        long syntheticHops = def.hops.stream()
+                .filter(h -> "Read Lookup CSV".equals(h.from) && "Lookup Attributes".equals(h.to))
+                .count();
+        assertEquals(1, syntheticHops, "Synthetic hop for lookup stream must be injected");
+    }
+
+    @Test
     void streamLookup_noLookupFieldSchema_fallsBackToSyntheticSchema() throws Exception {
         // The lookup CsvInput has NO <fields>/<field> declarations — common when the CSV
         // schema is auto-detected in Pentaho.  The StreamLookup mapper can still infer

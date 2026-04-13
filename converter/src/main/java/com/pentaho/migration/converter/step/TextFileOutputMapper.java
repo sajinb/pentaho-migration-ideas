@@ -17,15 +17,23 @@ public final class TextFileOutputMapper implements StepXmlMapper {
     public Map<String, String> map(Element e) {
         Map<String, String> p = new HashMap<>();
 
-        // <file>/<name> holds the output path; <file>/<separator> and <file>/<header> hold config
+        // <file>/<name> holds the output path; <separator> and <header> may be inside <file>
+        // or at the step level depending on the Pentaho KTR export version.
         String filePath = null;
         NodeList fileNodes = e.getElementsByTagName("file");
         if (fileNodes.getLength() > 0) {
             Element fileEl = (Element) fileNodes.item(0);
             filePath = child(fileEl, "name");
-            put(p, "separator",   child(fileEl, "separator", ","));
-            String header = child(fileEl, "header", "Y");
-            put(p, "writeHeader", yesNo(header));
+            // Prefer inside <file>, fall back to step level
+            String sep = child(fileEl, "separator");
+            if (sep == null) sep = child(e, "separator");
+            put(p, "separator", sep != null ? sep : ",");
+            String hdr = child(fileEl, "header");
+            if (hdr == null) hdr = child(e, "header");
+            put(p, "writeHeader", yesNo(hdr != null ? hdr : "Y"));
+        } else {
+            put(p, "separator",   child(e, "separator", ","));
+            put(p, "writeHeader", yesNo(child(e, "header", "Y")));
         }
         // Fallback: top-level <filename> used when <file> has no <name>, or <file> is absent
         if (filePath == null || filePath.isBlank()) {

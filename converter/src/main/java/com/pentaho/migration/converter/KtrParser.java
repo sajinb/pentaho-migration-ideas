@@ -871,7 +871,9 @@ public final class KtrParser {
         }
         List<String> schema = mainSchema != null ? new ArrayList<>(mainSchema) : new ArrayList<>();
 
-        // Append lookup output field names (renamed if <rename> present)
+        // Append lookup output field names — handles both XML formats:
+        // Format A: <lookup>/<value><name>/<rename>
+        // Format B: <valuestream><value>/<valuename>
         NodeList lookupEls = el.getElementsByTagName("lookup");
         if (lookupEls.getLength() > 0) {
             Element lookup = (Element) lookupEls.item(0);
@@ -881,6 +883,15 @@ public final class KtrParser {
                 String rename  = text(val, "rename");
                 String name    = text(val, "name");
                 String outName = (rename != null && !rename.isBlank()) ? rename : name;
+                if (outName != null && !outName.isBlank()) schema.add(outName);
+            }
+        } else {
+            // Format B: <valuestream><valuename> is the output field name
+            NodeList vstNodes = el.getElementsByTagName("valuestream");
+            for (int i = 0; i < vstNodes.getLength(); i++) {
+                Element vs      = (Element) vstNodes.item(i);
+                String outName  = text(vs, "valuename");
+                if (outName == null || outName.isBlank()) outName = text(vs, "value");
                 if (outName != null && !outName.isBlank()) schema.add(outName);
             }
         }

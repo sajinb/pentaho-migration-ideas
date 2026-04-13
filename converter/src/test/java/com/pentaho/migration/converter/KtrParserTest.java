@@ -1408,4 +1408,81 @@ class KtrParserTest {
         assertEquals("unit_price,currency", lookup.params.get("valueFields"));
         assertEquals("price,currency",      lookup.params.get("valueRenames"));
     }
+
+    // -------------------------------------------------------------------------
+    // StreamLookup — lookup hop absent from <order> (real-world Pentaho export style)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void streamLookup_lookupHopMissingFromOrder_syntheticHopInjected() throws Exception {
+        // In many real Pentaho KTR exports the lookup-stream hop does NOT appear in <order>.
+        // Only the main stream hop is there; the lookup source is only named via <from>
+        // inside the StreamLookup step XML. The parser must inject a synthetic hop so the
+        // executor receives two inputs instead of one (and avoids IOOBE).
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>lookup_no_order_hop</name></info>
+              <step>
+                <name>Main CSV</name>
+                <type>CSVInput</type>
+                <filename>/data/main.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>name</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Lookup CSV</name>
+                <type>CSVInput</type>
+                <filename>/data/lookup.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>ref_id</name></field>
+                  <field><name>category</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Enrich</name>
+                <type>StreamLookup</type>
+                <from>Lookup CSV</from>
+                <lookup>
+                  <key><name>id</name><field>ref_id</field></key>
+                  <value><name>category</name><rename>cat</rename></value>
+                </lookup>
+              </step>
+              <step><name>Out</name><type>TextFileOutput</type><file><name>/out.csv</name></file></step>
+              <order>
+                <!-- Only the main-stream hop is listed; lookup hop deliberately absent -->
+                <hop><from>Main CSV</from><to>Enrich</to><enabled>Y</enabled></hop>
+                <hop><from>Enrich</from><to>Out</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        // The parser must have injected a synthetic hop: Lookup CSV → Enrich
+        long hopsToEnrich = def.hops.stream()
+                .filter(h -> "Enrich".equals(h.to) && h.enabled)
+                .count();
+        assertEquals(2, hopsToEnrich, "Both main-stream and lookup-stream hops must exist");
+
+        boolean syntheticPresent = def.hops.stream()
+                .anyMatch(h -> "Lookup CSV".equals(h.from) && "Enrich".equals(h.to));
+        assertTrue(syntheticPresent, "Synthetic lookup hop must be injected");
+
+        // lookupInputIndex must still be correct (lookup is the synthetic / second upstream)
+        StepDefinition enrich = def.steps.stream()
+                .filter(s -> "StreamLookup".equals(s.type))
+                .findFirst().orElseThrow();
+        assertEquals("1", enrich.params.get("lookupInputIndex"),
+                "Lookup stream must be assigned to input index 1");
+
+        // Column indices must be resolved despite hop being absent from <order>
+        assertEquals("0", enrich.params.get("keyStreamCols"),  "id=col0 in main");
+        assertEquals("0", enrich.params.get("keyLookupCols"),  "ref_id=col0 in lookup");
+        assertEquals("1", enrich.params.get("valueFieldCols"), "category=col1 in lookup");
+    }
 }

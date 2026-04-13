@@ -140,6 +140,13 @@ public final class KtrParser {
         // All upstreams per step (used to infer MergeJoin step1/step2 when absent from XML)
         Map<String, List<String>> allUpstreamsOf  = buildAllUpstreamsMap(doc);
 
+        // Some Pentaho KTRs do NOT put the StreamLookup lookup-stream connection in <order>.
+        // Instead the lookup source step is only referenced inside the step XML via <from>.
+        // Inject those missing connections into the topology maps NOW so that schema
+        // propagation and column-index resolution can see both inputs.
+        List<HopDefinition> syntheticHops =
+                injectStreamLookupConnections(doc, allUpstreamsOf, downstreamOf);
+
         // Propagate schemas through intermediate steps (SortRows pass-through,
         // GroupBy → [groupKeys+aggNames], MergeJoin → [left+right], Formula → [in+newField]).
         propagateSchemas(doc, fieldSchemas, upstreamOf, allUpstreamsOf);
@@ -149,6 +156,8 @@ public final class KtrParser {
         def.parameters = extractParameters(doc);
         def.steps      = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf);
         def.hops       = extractHops(doc);
+        // Append synthetic hops so the executor wires both inputs to StreamLookup steps
+        def.hops.addAll(syntheticHops);
         return def;
     }
 
@@ -717,6 +726,56 @@ public final class KtrParser {
             hops.add(hop);
         }
         return hops;
+    }
+
+    /**
+     * Scans every {@code StreamLookup} step in the document and ensures its lookup-stream
+     * connection appears in the topology maps ({@code allUpstreamsOf} and {@code downstreamOf}).
+     *
+     * <p>In some Pentaho KTR exports the lookup-stream hop is <em>absent</em> from the
+     * {@code <order>} section — the lookup source step is only named via {@code <from>} inside
+     * the step XML. Without this injection the engine would only receive 1 input iterator and
+     * throw an {@code IndexOutOfBoundsException} when trying to access the second input.
+     *
+     * @return synthetic {@link HopDefinition} objects for connections that were missing, so the
+     *         caller can append them to the parsed hop list and the executor can wire them correctly.
+     */
+    private static List<HopDefinition> injectStreamLookupConnections(
+            Document doc,
+            Map<String, List<String>> allUpstreamsOf,
+            Map<String, List<String>> downstreamOf) {
+
+        List<HopDefinition> synthetic = new ArrayList<>();
+        NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
+        for (int i = 0; i < stepNodes.getLength(); i++) {
+            Element el = (Element) stepNodes.item(i);
+            if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
+            if (!"StreamLookup".equals(normalizeType(text(el, "type")))) continue;
+            String stepName = text(el, "name");
+            if (stepName == null) continue;
+
+            // Identify the lookup source step: <from> or <lookupsteps>/<lookupstep>/<name>
+            String fromStep = text(el, "from");
+            if (fromStep == null || fromStep.isBlank()) {
+                NodeList lsNodes = el.getElementsByTagName("lookupstep");
+                if (lsNodes.getLength() > 0) fromStep = text((Element) lsNodes.item(0), "name");
+            }
+            if (fromStep == null || fromStep.isBlank()) continue;
+
+            // Only inject when the lookup hop is missing from <order>
+            List<String> ups = allUpstreamsOf.getOrDefault(stepName, List.of());
+            if (ups.contains(fromStep)) continue;
+
+            allUpstreamsOf.computeIfAbsent(stepName, k -> new ArrayList<>()).add(fromStep);
+            downstreamOf.computeIfAbsent(fromStep,   k -> new ArrayList<>()).add(stepName);
+
+            HopDefinition hop = new HopDefinition();
+            hop.from    = fromStep;
+            hop.to      = stepName;
+            hop.enabled = true;
+            synthetic.add(hop);
+        }
+        return synthetic;
     }
 
     /**

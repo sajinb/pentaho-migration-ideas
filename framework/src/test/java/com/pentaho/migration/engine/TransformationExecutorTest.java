@@ -428,6 +428,80 @@ class TransformationExecutorTest {
     }
 
     // -------------------------------------------------------------------------
+    // Variable substitution — ${VAR} tokens resolved from def.parameters
+    // -------------------------------------------------------------------------
+
+    @Test
+    void variableSubstitution_resolvedFromParameters() throws Exception {
+        Path input  = writeCsv("var_in.csv", "name,score", "Alice,90", "Bob,70");
+        Path output = tmp.resolve("var_out.csv");
+
+        TransformationDefinition def = new TransformationDefinition();
+        def.name       = "var_test";
+        def.parameters = Map.of(
+                "INPUT_PATH",  input.toString(),
+                "OUTPUT_PATH", output.toString());
+        def.steps = List.of(
+            step("src", "CsvInput",       Map.of("filePath", "${INPUT_PATH}")),
+            step("out", "TextFileOutput", Map.of("filePath", "${OUTPUT_PATH}"))
+        );
+        def.hops = List.of(hop("src", "out"));
+
+        new TransformationExecutor(StepRegistry.withDefaults()).execute(def);
+
+        List<String[]> rows = readCsv(output);
+        assertEquals(2, rows.size());
+        assertEquals("Alice", rows.get(0)[0]);
+    }
+
+    // -------------------------------------------------------------------------
+    // StreamLookup — hash join: main stream enriched with lookup values
+    // -------------------------------------------------------------------------
+
+    @Test
+    void streamLookup_enrichesMainStreamWithLookupValues() throws Exception {
+        // Main stream: order_id, customer
+        Path orders = writeCsv("orders.csv", "order_id,customer",
+                "101,Alice", "102,Bob", "103,Carol");
+        // Lookup stream: order_id, price
+        Path prices = writeCsv("prices.csv", "order_id,price",
+                "101,9.99", "102,19.99", "999,0.01");   // 999 has no match in main
+        Path output = tmp.resolve("enriched.csv");
+
+        TransformationDefinition def = new TransformationDefinition();
+        def.name  = "lookup_test";
+        def.steps = List.of(
+            step("orders", "CsvInput", Map.of("filePath", orders.toString())),
+            step("prices", "CsvInput", Map.of("filePath", prices.toString())),
+            step("enrich", "StreamLookup", Map.of(
+                    "lookupInputIndex", "1",  // prices is second input
+                    "keyStreamCols",    "0",  // order_id in main stream
+                    "keyLookupCols",    "0",  // order_id in lookup stream
+                    "valueFieldCols",   "1"   // price column (index 1 in lookup)
+            )),
+            step("out", "TextFileOutput", Map.of("filePath", output.toString()))
+        );
+        // hops: orders→enrich, prices→enrich (lookup), enrich→out
+        def.hops = List.of(
+            hop("orders", "enrich"),
+            hop("prices", "enrich"),
+            hop("enrich", "out")
+        );
+
+        new TransformationExecutor(StepRegistry.withDefaults()).execute(def);
+
+        List<String[]> rows = readCsv(output);
+        // 3 main rows; 103/Carol has no match → price column is null (empty string in CSV)
+        assertEquals(3, rows.size());
+        assertEquals("101",  rows.get(0)[0]);
+        assertEquals("9.99", rows.get(0)[2]);   // price appended as col 2
+        assertEquals("102",  rows.get(1)[0]);
+        assertEquals("19.99", rows.get(1)[2]);
+        assertEquals("103",  rows.get(2)[0]);
+        assertEquals("",     rows.get(2)[2]);   // no match → null → empty in CSV
+    }
+
+    // -------------------------------------------------------------------------
     // Builder helpers
     // -------------------------------------------------------------------------
 

@@ -1220,4 +1220,192 @@ class KtrParserTest {
                 .filter(h -> "Append Streams".equals(h.to)).count();
         assertEquals(2, inboundToAppend, "Both CsvInput hops should target Append Streams");
     }
+
+    // -------------------------------------------------------------------------
+    // KTR parameters — variable substitution defaults
+    // -------------------------------------------------------------------------
+
+    @Test
+    void ktrParameters_parsedIntoDefinition() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>param_test</name></info>
+              <parameters>
+                <parameter>
+                  <name>INPUT_CSV</name>
+                  <default_value>C:\\pentaho-samples\\input.csv</default_value>
+                  <description/>
+                </parameter>
+                <parameter>
+                  <name>OUTPUT_CSV</name>
+                  <default_value>/data/output.csv</default_value>
+                  <description/>
+                </parameter>
+              </parameters>
+              <step>
+                <name>read</name>
+                <type>CSVInput</type>
+                <filename>${INPUT_CSV}</filename>
+                <header>Y</header>
+              </step>
+              <order/>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        assertNotNull(def.parameters, "parameters map must not be null");
+        assertEquals(2, def.parameters.size());
+        assertEquals("C:\\pentaho-samples\\input.csv", def.parameters.get("INPUT_CSV"));
+        assertEquals("/data/output.csv",               def.parameters.get("OUTPUT_CSV"));
+
+        // The step param carries the literal ${INPUT_CSV} token — resolution happens in executor
+        StepDefinition read = def.steps.get(0);
+        assertEquals("${INPUT_CSV}", read.params.get("filePath"));
+    }
+
+    // -------------------------------------------------------------------------
+    // FilterRows — <compare><condition> nested format
+    // -------------------------------------------------------------------------
+
+    @Test
+    void filterRows_compareNestedCondition_parsedCorrectly() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>filter_test</name></info>
+              <step>
+                <name>source</name>
+                <type>CSVInput</type>
+                <filename>/in.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>id</name></field>
+                  <field><name>status</name></field>
+                  <field><name>amount</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>filter_active</name>
+                <type>FilterRows</type>
+                <send_true_to>active_out</send_true_to>
+                <send_false_to>inactive_out</send_false_to>
+                <compare>
+                  <condition>
+                    <leftvalue>status</leftvalue>
+                    <function>=</function>
+                    <rightvalue>ACTIVE</rightvalue>
+                  </condition>
+                </compare>
+              </step>
+              <step><name>active_out</name><type>Dummy (do nothing)</type></step>
+              <step><name>inactive_out</name><type>Dummy (do nothing)</type></step>
+              <order>
+                <hop><from>source</from><to>filter_active</to><enabled>Y</enabled></hop>
+                <hop><from>filter_active</from><to>active_out</to><enabled>Y</enabled></hop>
+                <hop><from>filter_active</from><to>inactive_out</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        StepDefinition filter = def.steps.stream()
+                .filter(s -> "FilterRows".equals(s.type))
+                .findFirst().orElseThrow();
+
+        // column name "status" should be resolved to index 1 (0=id, 1=status, 2=amount)
+        assertEquals("1",       filter.params.get("column"),   "status column index should be 1");
+        assertEquals("EQ",      filter.params.get("operator"), "= should normalise to EQ");
+        assertEquals("ACTIVE",  filter.params.get("value"));
+        assertEquals("active_out",   filter.params.get("trueStep"));
+        assertEquals("inactive_out", filter.params.get("falseStep"));
+    }
+
+    // -------------------------------------------------------------------------
+    // StreamLookup — mapper + KtrParser integration
+    // -------------------------------------------------------------------------
+
+    @Test
+    void streamLookup_parsedCorrectly() throws Exception {
+        String ktr = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <transformation>
+              <info><name>lookup_test</name></info>
+              <step>
+                <name>Main Stream</name>
+                <type>CSVInput</type>
+                <filename>/data/orders.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>order_id</name></field>
+                  <field><name>customer_name</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Lookup Source</name>
+                <type>CSVInput</type>
+                <filename>/data/prices.csv</filename>
+                <header>Y</header>
+                <fields>
+                  <field><name>item_id</name></field>
+                  <field><name>unit_price</name></field>
+                  <field><name>currency</name></field>
+                </fields>
+              </step>
+              <step>
+                <name>Enrich Orders</name>
+                <type>StreamLookup</type>
+                <from>Lookup Source</from>
+                <lookup>
+                  <key>
+                    <name>order_id</name>
+                    <field>item_id</field>
+                  </key>
+                  <value>
+                    <name>unit_price</name>
+                    <rename>price</rename>
+                  </value>
+                  <value>
+                    <name>currency</name>
+                    <rename/>
+                  </value>
+                </lookup>
+              </step>
+              <step><name>Output</name><type>TextFileOutput</type><file><name>/out.csv</name></file></step>
+              <order>
+                <hop><from>Main Stream</from><to>Enrich Orders</to><enabled>Y</enabled></hop>
+                <hop><from>Lookup Source</from><to>Enrich Orders</to><enabled>Y</enabled></hop>
+                <hop><from>Enrich Orders</from><to>Output</to><enabled>Y</enabled></hop>
+              </order>
+            </transformation>
+            """;
+
+        TransformationDefinition def = parse(ktr);
+
+        StepDefinition lookup = def.steps.stream()
+                .filter(s -> "StreamLookup".equals(s.type))
+                .findFirst().orElseThrow();
+
+        // lookupStep must name the lookup source
+        assertEquals("Lookup Source", lookup.params.get("lookupStep"));
+
+        // Raw field names preserved for documentation; resolved index params are the important ones
+        assertEquals("order_id", lookup.params.get("keyStream"));
+        assertEquals("item_id",  lookup.params.get("keyLookup"));
+
+        // Resolved indices: "Main Stream" schema=[order_id=0,customer_name=1]
+        assertEquals("0", lookup.params.get("keyStreamCols"), "order_id is col 0 in main stream");
+        // Resolved indices: "Lookup Source" schema=[item_id=0,unit_price=1,currency=2]
+        assertEquals("0", lookup.params.get("keyLookupCols"),  "item_id is col 0 in lookup");
+        assertEquals("1,2", lookup.params.get("valueFieldCols"), "unit_price=1, currency=2");
+
+        // lookupInputIndex: "Lookup Source" is second in allUpstreams (main added first via hop order)
+        assertEquals("1", lookup.params.get("lookupInputIndex"));
+
+        // Renamed output fields
+        assertEquals("unit_price,currency", lookup.params.get("valueFields"));
+        assertEquals("price,currency",      lookup.params.get("valueRenames"));
+    }
 }

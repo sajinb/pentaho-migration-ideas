@@ -145,9 +145,10 @@ public final class KtrParser {
         propagateSchemas(doc, fieldSchemas, upstreamOf, allUpstreamsOf);
 
         TransformationDefinition def = new TransformationDefinition();
-        def.name  = extractName(doc);
-        def.steps = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf);
-        def.hops  = extractHops(doc);
+        def.name       = extractName(doc);
+        def.parameters = extractParameters(doc);
+        def.steps      = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf);
+        def.hops       = extractHops(doc);
         return def;
     }
 
@@ -312,6 +313,10 @@ public final class KtrParser {
                                                                              fieldSchemas, upstreamOf);
             case "ScriptValueMod"          -> computeScriptOutputSchema(el, stepName,
                                                                          fieldSchemas, upstreamOf);
+            case "StreamLookup"            -> computeStreamLookupOutputSchema(el, stepName,
+                                                                               fieldSchemas,
+                                                                               allUpstreamsOf,
+                                                                               upstreamOf);
             default -> null;
         };
     }
@@ -566,6 +571,36 @@ public final class KtrParser {
                         if (idx >= 0) sd.params.put("column", String.valueOf(idx));
                     }
                 }
+            } else if ("StreamLookup".equals(sd.type)) {
+                // Determine which input index is the lookup stream vs. the main stream.
+                String lookupStepName = sd.params.get("lookupStep");
+                List<String> ups = allUpstreamsOf.getOrDefault(sd.id, List.of());
+
+                int lookupInputIdx = 1; // default: second input is lookup
+                if (lookupStepName != null) {
+                    int idx = ups.indexOf(lookupStepName);
+                    if (idx >= 0) lookupInputIdx = idx;
+                }
+                sd.params.put("lookupInputIndex", String.valueOf(lookupInputIdx));
+
+                int mainInputIdx      = lookupInputIdx == 0 ? 1 : 0;
+                String mainUpstream   = ups.size() > mainInputIdx   ? ups.get(mainInputIdx)   : null;
+                String lookupUpstream = ups.size() > lookupInputIdx ? ups.get(lookupInputIdx) : null;
+
+                // Resolve key field names in the main stream
+                if (mainUpstream != null) {
+                    List<String> mainSchema = fieldSchemas.get(mainUpstream);
+                    if (mainSchema == null) mainSchema = findUpstreamSchema(mainUpstream, upstreamOf, fieldSchemas);
+                    resolveToIndexParam(sd.params, "keyStream",   "keyStreamCols", mainSchema);
+                }
+
+                // Resolve key and value field names in the lookup stream
+                if (lookupUpstream != null) {
+                    List<String> lookupSchema = fieldSchemas.get(lookupUpstream);
+                    if (lookupSchema == null) lookupSchema = findUpstreamSchema(lookupUpstream, upstreamOf, fieldSchemas);
+                    resolveToIndexParam(sd.params, "keyLookup",   "keyLookupCols",  lookupSchema);
+                    resolveToIndexParam(sd.params, "valueFields", "valueFieldCols", lookupSchema);
+                }
             }
 
             steps.add(sd);
@@ -682,6 +717,97 @@ public final class KtrParser {
             hops.add(hop);
         }
         return hops;
+    }
+
+    /**
+     * Parses the KTR {@code <parameters>} section into a name→default-value map.
+     * Only direct children of {@code <parameters>} are collected to avoid picking up
+     * field-level {@code <parameter>} elements inside step definitions.
+     */
+    private static Map<String, String> extractParameters(Document doc) {
+        Map<String, String> params = new LinkedHashMap<>();
+        NodeList paramNodes = doc.getElementsByTagName("parameter");
+        for (int i = 0; i < paramNodes.getLength(); i++) {
+            Element el = (Element) paramNodes.item(i);
+            // Only include <parameter> elements whose immediate parent is <parameters>
+            if (!"parameters".equals(el.getParentNode().getNodeName())) continue;
+            String name       = text(el, "name");
+            String defaultVal = text(el, "default_value");
+            if (name != null && !name.isBlank()) {
+                params.put(name, defaultVal != null ? defaultVal : "");
+            }
+        }
+        return params;
+    }
+
+    /**
+     * Resolves comma-separated column names in {@code srcParam} to 0-based indices
+     * in {@code destParam} using the given schema list.
+     * Tokens that are already integers are kept unchanged.
+     */
+    private static void resolveToIndexParam(Map<String, String> params,
+                                             String srcParam, String destParam,
+                                             List<String> schema) {
+        String raw = params.get(srcParam);
+        if (raw == null || raw.isBlank() || schema == null) return;
+        String[] names   = raw.split(",");
+        String[] indices = new String[names.length];
+        for (int i = 0; i < names.length; i++) {
+            String name = names[i].trim();
+            if (isInteger(name)) {
+                indices[i] = name;
+            } else {
+                int idx = schema.indexOf(name);
+                indices[i] = idx >= 0 ? String.valueOf(idx) : "0";
+            }
+        }
+        params.put(destParam, String.join(",", indices));
+    }
+
+    /**
+     * StreamLookup output schema = main-stream schema + renamed lookup-value field names.
+     * The lookup stream is identified by the {@code <from>} element inside the step.
+     */
+    private static List<String> computeStreamLookupOutputSchema(Element el, String stepName,
+                                                                  Map<String, List<String>> fieldSchemas,
+                                                                  Map<String, List<String>> allUpstreamsOf,
+                                                                  Map<String, String> upstreamOf) {
+        String fromStep = text(el, "from");
+        if (fromStep == null || fromStep.isBlank()) {
+            // Try <lookupsteps>/<lookupstep>/<name>
+            NodeList lsNodes = el.getElementsByTagName("lookupstep");
+            if (lsNodes.getLength() > 0) fromStep = text((Element) lsNodes.item(0), "name");
+        }
+
+        // Identify the main (non-lookup) upstream step
+        List<String> ups = allUpstreamsOf.getOrDefault(stepName, List.of());
+        String mainUpstream = null;
+        for (String up : ups) {
+            if (!up.equals(fromStep)) { mainUpstream = up; break; }
+        }
+        if (mainUpstream == null && !ups.isEmpty()) mainUpstream = ups.get(0);
+
+        List<String> mainSchema = mainUpstream != null ? fieldSchemas.get(mainUpstream) : null;
+        if (mainSchema == null && mainUpstream != null) {
+            mainSchema = findUpstreamSchema(mainUpstream, upstreamOf, fieldSchemas);
+        }
+        List<String> schema = mainSchema != null ? new ArrayList<>(mainSchema) : new ArrayList<>();
+
+        // Append lookup output field names (renamed if <rename> present)
+        NodeList lookupEls = el.getElementsByTagName("lookup");
+        if (lookupEls.getLength() > 0) {
+            Element lookup = (Element) lookupEls.item(0);
+            NodeList valueEls = lookup.getElementsByTagName("value");
+            for (int i = 0; i < valueEls.getLength(); i++) {
+                Element val    = (Element) valueEls.item(i);
+                String rename  = text(val, "rename");
+                String name    = text(val, "name");
+                String outName = (rename != null && !rename.isBlank()) ? rename : name;
+                if (outName != null && !outName.isBlank()) schema.add(outName);
+            }
+        }
+
+        return schema.isEmpty() ? null : schema;
     }
 
     private static String text(Element parent, String tag) {

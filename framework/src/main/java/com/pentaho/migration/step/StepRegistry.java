@@ -113,6 +113,7 @@ public final class StepRegistry {
         r.register("JoinRows",             JoinRowsStep.class);
         r.register("MergeRows",            MergeRowsStep.class);
         r.register("MultiwayMergeJoin",    MultiwayMergeJoinStep.class);
+        r.register("StreamLookup",         StreamLookupStep.class);
 
         // --- Pattern F: routing/conditional fan-out steps ---
         r.register("FilterRows",           FilterRowsStep.class);

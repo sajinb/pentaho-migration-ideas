@@ -99,6 +99,9 @@ public final class TransformationExecutor {
             Map<String, Step> overrides,
             Map<String, Iterator<Row>> extraOutputs) throws Exception {
 
+        // --- 0. Build variable substitution context ---
+        Map<String, String> varContext = buildVarContext(def);
+
         // --- 1. Build adjacency maps ---
         Map<String, List<String>> outgoing = new HashMap<>();
         Map<String, List<String>> incoming = new HashMap<>();
@@ -125,7 +128,8 @@ public final class TransformationExecutor {
             Step step = (overrides != null && overrides.containsKey(stepId))
                     ? overrides.get(stepId)
                     : registry.instantiate(stepDef.type,
-                            stepDef.params != null ? stepDef.params : Map.of());
+                            resolveVars(stepDef.params != null ? stepDef.params : Map.of(),
+                                        varContext));
 
             // Collect upstream iterators (fan-in: ordered by incoming list)
             List<Iterator<Row>> inputs = incoming.getOrDefault(stepId, List.of())
@@ -223,5 +227,49 @@ public final class TransformationExecutor {
                 .filter(s -> id.equals(s.id))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("Step not found: " + id));
+    }
+
+    // -------------------------------------------------------------------------
+    // Variable substitution — resolves ${VAR} tokens in step params
+    // -------------------------------------------------------------------------
+
+    /**
+     * Builds the variable resolution context: System environment as base,
+     * overridden by KTR parameter defaults (so KTR params win over env vars).
+     */
+    private static Map<String, String> buildVarContext(TransformationDefinition def) {
+        Map<String, String> ctx = new HashMap<>(System.getenv());
+        if (def.parameters != null) ctx.putAll(def.parameters);
+        return ctx;
+    }
+
+    /** Returns a copy of {@code params} with all {@code ${VAR}} tokens resolved. */
+    private static Map<String, String> resolveVars(Map<String, String> params,
+                                                    Map<String, String> vars) {
+        if (vars.isEmpty()) return params;
+        Map<String, String> resolved = new HashMap<>(params.size());
+        for (Map.Entry<String, String> e : params.entrySet()) {
+            resolved.put(e.getKey(), resolveVar(e.getValue(), vars));
+        }
+        return resolved;
+    }
+
+    /** Replaces each {@code ${NAME}} token in {@code value} with the matching var value. */
+    private static String resolveVar(String value, Map<String, String> vars) {
+        if (value == null || !value.contains("${")) return value;
+        StringBuilder sb = new StringBuilder();
+        int pos = 0;
+        while (pos < value.length()) {
+            int start = value.indexOf("${", pos);
+            if (start < 0) { sb.append(value, pos, value.length()); break; }
+            sb.append(value, pos, start);
+            int end = value.indexOf('}', start + 2);
+            if (end < 0) { sb.append(value, start, value.length()); break; }
+            String varName = value.substring(start + 2, end);
+            String replacement = vars.get(varName);
+            sb.append(replacement != null ? replacement : value.substring(start, end + 1));
+            pos = end + 1;
+        }
+        return sb.toString();
     }
 }

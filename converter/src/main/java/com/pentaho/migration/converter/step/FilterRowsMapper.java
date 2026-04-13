@@ -53,6 +53,29 @@ public final class FilterRowsMapper implements StepXmlMapper {
         NodeList compareNodes = e.getElementsByTagName("compare");
         if (compareNodes.getLength() > 0) {
             Element cmp = (Element) compareNodes.item(0);
+
+            // Real-world KTRs sometimes nest a <condition> inside <compare>:
+            //   <compare><condition><leftvalue>…</leftvalue>…</condition></compare>
+            NodeList nestedCond = cmp.getElementsByTagName("condition");
+            if (nestedCond.getLength() > 0) {
+                // Delegate to condition-style parsing using the nested element.
+                Element cond = (Element) nestedCond.item(0);
+                put(p, "column",   child(cond, "leftvalue"));
+                String rawOp = child(cond, "function");
+                put(p, "operator", normalizeOperator(rawOp));
+                String val = child(cond, "rightvalue");
+                if (val == null || val.isBlank()) val = child(cond, "rightstring");
+                if (val == null || val.isBlank()) {
+                    NodeList valueEls = cond.getElementsByTagName("value");
+                    if (valueEls.getLength() > 0) {
+                        val = text((Element) valueEls.item(0), "text");
+                    }
+                }
+                put(p, "value", val);
+                return p;
+            }
+
+            // Flat <compare><fieldname> format (oldest KTR export style)
             put(p, "column",   child(cmp, "fieldname"));
             put(p, "operator", child(cmp, "operator"));  // may be absent → default EQ in step
             put(p, "value",    child(cmp, "value"));

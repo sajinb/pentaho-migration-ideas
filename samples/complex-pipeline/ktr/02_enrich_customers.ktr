@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KTR 2: Enrich Confirmed Orders with Customer Data
+  ==================================================
+  Reads confirmed_orders.csv (written by KTR 1 with header).
+  Looks up customer name/country/segment from customers.csv using a
+  StreamLookup in Format B (<keystream>/<keylookup>/<valuestream> siblings).
+  Sorts the enriched rows by last_name, then writes enriched_orders.csv.
+
+  Demonstrates: chained CsvInput (reads header), StreamLookup Format B,
+                SortRows (column-name resolved to index), TextFileOutput (with header)
+-->
+<transformation>
+  <info>
+    <name>02_enrich_customers</name>
+    <parameters>
+      <parameter>
+        <name>BASE_PATH</name>
+        <default_value></default_value>
+      </parameter>
+    </parameters>
+  </info>
+
+  <!-- ─── Main stream source: confirmed orders (has header from KTR 1) ─── -->
+  <step>
+    <name>read_confirmed</name>
+    <type>CsvInput</type>
+    <filename>${BASE_PATH}/output/confirmed_orders.csv</filename>
+    <header>Y</header>
+    <separator>,</separator>
+    <enclosure>&quot;</enclosure>
+    <!-- Schema must match the columns written by KTR 1's confirmed_output step -->
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Lookup stream source: customer reference data ───────────────── -->
+  <step>
+    <name>read_customers</name>
+    <type>CsvInput</type>
+    <filename>${BASE_PATH}/input/customers.csv</filename>
+    <header>Y</header>
+    <separator>,</separator>
+    <enclosure>&quot;</enclosure>
+    <!-- Lookup schema: KtrParser uses these to resolve keyLookup / valueFields names
+         to 0-based indices: cust_id=0, first_name=1, last_name=2, country=3, segment=4 -->
+    <fields>
+      <field><name>cust_id</name></field>
+      <field><name>first_name</name></field>
+      <field><name>last_name</name></field>
+      <field><name>country</name></field>
+      <field><name>segment</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── StreamLookup Format B: join on customer_id = cust_id ────────── -->
+  <!--
+    After joining, the output row schema is:
+      [order_id(0), customer_id(1), product_id(2), quantity(3), unit_price(4),
+       status(5), first_name(6), last_name(7), country(8)]
+    KtrParser resolves:
+      keyStream   "customer_id" → keyStreamCols  = "1"  (index in main stream)
+      keyLookup   "cust_id"     → keyLookupCols  = "0"  (index in lookup stream)
+      valueFields "first_name,last_name,country"
+                                → valueFieldCols = "1,2,3" (indices in lookup stream)
+  -->
+  <step>
+    <name>enrich_customers</name>
+    <type>StreamLookup</type>
+    <!-- Identifies which upstream step provides the lookup rows -->
+    <from>read_customers</from>
+    <!-- Join key in the MAIN stream (confirmed orders) -->
+    <keystream>customer_id</keystream>
+    <!-- Matching key in the LOOKUP stream (customers.csv) -->
+    <keylookup>cust_id</keylookup>
+    <!-- Fields to copy from the lookup stream into the output row -->
+    <valuestream>
+      <value>first_name</value>
+      <valuename>first_name</valuename>
+    </valuestream>
+    <valuestream>
+      <value>last_name</value>
+      <valuename>last_name</valuename>
+    </valuestream>
+    <valuestream>
+      <value>country</value>
+      <valuename>country</valuename>
+    </valuestream>
+  </step>
+
+  <!-- ─── Sort by customer last name ──────────────────────────────────── -->
+  <!--
+    KtrParser resolves "last_name" → index 7 in the StreamLookup output schema.
+  -->
+  <step>
+    <name>sort_by_name</name>
+    <type>SortRows</type>
+    <fields>
+      <field>
+        <name>last_name</name>
+        <sort_direction>ascending</sort_direction>
+      </field>
+    </fields>
+  </step>
+
+  <!-- ─── Sink: enriched orders with customer columns ─────────────────── -->
+  <!--
+    Writes all 9 columns in order. The header row will be written because
+    writeHeader=true. KTR 3 reads this file with header=Y so the first row
+    (the header) is skipped as data.
+  -->
+  <step>
+    <name>write_enriched</name>
+    <type>TextFileOutput</type>
+    <file>
+      <name>${BASE_PATH}/output/enriched_orders.csv</name>
+      <separator>,</separator>
+      <header>Y</header>
+    </file>
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+      <field><name>first_name</name></field>
+      <field><name>last_name</name></field>
+      <field><name>country</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Hop definitions ──────────────────────────────────────────────── -->
+  <!--
+    IMPORTANT: read_confirmed hop must come before read_customers hop so that
+    allUpstreamsOf["enrich_customers"] = ["read_confirmed", "read_customers"].
+    This ensures: mainInputIdx=0 (confirmed), lookupInputIdx=1 (customers).
+  -->
+  <order>
+    <hop>
+      <from>read_confirmed</from>
+      <to>enrich_customers</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>read_customers</from>
+      <to>enrich_customers</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>enrich_customers</from>
+      <to>sort_by_name</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>sort_by_name</from>
+      <to>write_enriched</to>
+      <enabled>Y</enabled>
+    </hop>
+  </order>
+</transformation>

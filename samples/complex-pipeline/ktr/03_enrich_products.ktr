@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KTR 3: Enrich Orders with Product Data and Sort by Category
+  =============================================================
+  Reads enriched_orders.csv (9 columns, written by KTR 2 with header).
+  Looks up product_name and category from products.csv using a StreamLookup
+  in Format A (<lookup>/<key>/<value> container — newer KTR designer format).
+  Sorts by category, then writes final_report.csv with a subset of columns.
+
+  Demonstrates: StreamLookup Format A, multi-column schema propagation,
+                column reordering in TextFileOutput
+-->
+<transformation>
+  <info>
+    <name>03_enrich_products</name>
+    <parameters>
+      <parameter>
+        <name>BASE_PATH</name>
+        <default_value></default_value>
+      </parameter>
+    </parameters>
+  </info>
+
+  <!-- ─── Main stream source: enriched orders (9 cols, has header from KTR 2) ─ -->
+  <step>
+    <name>read_enriched</name>
+    <type>CsvInput</type>
+    <filename>${BASE_PATH}/output/enriched_orders.csv</filename>
+    <header>Y</header>
+    <separator>,</separator>
+    <enclosure>&quot;</enclosure>
+    <!-- Schema must match the 9 columns written by KTR 2's write_enriched step:
+         order_id(0), customer_id(1), product_id(2), quantity(3), unit_price(4),
+         status(5), first_name(6), last_name(7), country(8) -->
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+      <field><name>first_name</name></field>
+      <field><name>last_name</name></field>
+      <field><name>country</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Lookup stream source: product reference data ───────────────── -->
+  <step>
+    <name>read_products</name>
+    <type>CsvInput</type>
+    <filename>${BASE_PATH}/input/products.csv</filename>
+    <header>Y</header>
+    <separator>,</separator>
+    <enclosure>&quot;</enclosure>
+    <!-- Lookup schema: prod_id=0, product_name=1, category=2, price=3 -->
+    <fields>
+      <field><name>prod_id</name></field>
+      <field><name>product_name</name></field>
+      <field><name>category</name></field>
+      <field><name>price</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── StreamLookup Format A: join on product_id = prod_id ────────── -->
+  <!--
+    Format A uses a <lookup> container with <key> and <value> children.
+    After joining, the output row schema extends to 11 columns:
+      [order_id(0), customer_id(1), product_id(2), quantity(3), unit_price(4),
+       status(5), first_name(6), last_name(7), country(8),
+       product_name(9), category(10)]
+    KtrParser resolves:
+      key.name  "product_id" → keyStreamCols  = "2"  (index in main stream)
+      key.field "prod_id"    → keyLookupCols  = "0"  (index in lookup stream)
+      value "product_name"   → valueFieldCols = "1"  (index in lookup stream)
+      value "category"       → valueFieldCols = "1,2"
+  -->
+  <step>
+    <name>enrich_products</name>
+    <type>StreamLookup</type>
+    <!-- Identifies which upstream step provides the lookup rows -->
+    <from>read_products</from>
+    <lookup>
+      <key>
+        <!-- field in the main (enriched orders) stream -->
+        <name>product_id</name>
+        <!-- matching field in the lookup (products) stream -->
+        <field>prod_id</field>
+      </key>
+      <value>
+        <!-- source field name in the lookup stream -->
+        <name>product_name</name>
+        <!-- output field name added to the row (rename = same as source here) -->
+        <rename>product_name</rename>
+      </value>
+      <value>
+        <name>category</name>
+        <rename>category</rename>
+      </value>
+    </lookup>
+  </step>
+
+  <!-- ─── Sort by product category (ascending) ─────────────────────────── -->
+  <!--
+    KtrParser resolves "category" → index 10 in the StreamLookup output schema.
+  -->
+  <step>
+    <name>sort_by_category</name>
+    <type>SortRows</type>
+    <fields>
+      <field>
+        <name>category</name>
+        <sort_direction>ascending</sort_direction>
+      </field>
+    </fields>
+  </step>
+
+  <!-- ─── Sink: final report with selected + reordered columns ──────────── -->
+  <!--
+    Writes 8 columns in a business-friendly order (customer name, location,
+    product, then transaction figures). KtrParser resolves each name to its
+    index in the 11-column schema and emits outputCols = "0,6,7,8,9,10,3,4".
+    Expected output (sorted by category):
+      order_id,first_name,last_name,country,product_name,category,quantity,unit_price
+      1005,Bob,Jones,US,Laptop Stand,Electronics,2,149.99
+      1001,Alice,Smith,UK,Widget Pro,Electronics,2,29.99
+      1003,Alice,Smith,UK,Widget Pro,Electronics,3,29.99
+      1004,Carol,Brown,UK,Desk Lamp,HomeGoods,1,79.99
+  -->
+  <step>
+    <name>write_final</name>
+    <type>TextFileOutput</type>
+    <file>
+      <name>${BASE_PATH}/output/final_report.csv</name>
+      <separator>,</separator>
+      <header>Y</header>
+    </file>
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>first_name</name></field>
+      <field><name>last_name</name></field>
+      <field><name>country</name></field>
+      <field><name>product_name</name></field>
+      <field><name>category</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Hop definitions ──────────────────────────────────────────────── -->
+  <!--
+    IMPORTANT: read_enriched hop must come before read_products hop so that
+    allUpstreamsOf["enrich_products"] = ["read_enriched", "read_products"].
+    This ensures: mainInputIdx=0 (enriched), lookupInputIdx=1 (products).
+  -->
+  <order>
+    <hop>
+      <from>read_enriched</from>
+      <to>enrich_products</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>read_products</from>
+      <to>enrich_products</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>enrich_products</from>
+      <to>sort_by_category</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>sort_by_category</from>
+      <to>write_final</to>
+      <enabled>Y</enabled>
+    </hop>
+  </order>
+</transformation>

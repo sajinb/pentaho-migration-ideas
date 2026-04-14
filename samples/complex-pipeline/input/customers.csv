@@ -1,0 +1,4 @@
+cust_id,first_name,last_name,country,segment
+C001,Alice,Smith,UK,PREMIUM
+C002,Bob,Jones,US,STANDARD
+C003,Carol,Brown,UK,PREMIUM

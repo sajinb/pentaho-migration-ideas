@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KJB: Sales Pipeline
+  ====================
+  Orchestrates three transformations in sequence:
+    1. 01_filter_orders  — split orders into confirmed / rejected
+    2. 02_enrich_customers — join confirmed orders with customer data
+    3. 03_enrich_products  — join enriched orders with product data, produce report
+
+  Parameter:
+    BASE_PATH  Path prefix for all input/output CSV files and the directory
+               that holds the converted YAML files.
+               Example: /home/user/pentaho-migration-ideas/samples/complex-pipeline
+
+  Hop evaluation:
+    START → filter_orders   unconditional
+    filter_orders → enrich_customers   on success
+    enrich_customers → enrich_products on success
+    enrich_products → SUCCESS          on success
+-->
+<job>
+  <name>sales_pipeline</name>
+
+  <parameters>
+    <parameter>
+      <name>BASE_PATH</name>
+      <default_value></default_value>
+      <description>Root path for input/output CSV files and YAML directory</description>
+    </parameter>
+  </parameters>
+
+  <entries>
+    <entry>
+      <name>START</name>
+      <type>SPECIAL</type>
+      <start>Y</start>
+    </entry>
+
+    <entry>
+      <name>filter_orders</name>
+      <type>TRANS</type>
+      <!--
+        KjbParser strips directory and .ktr suffix, appends .yaml.
+        RunTransformationEntry then strips all directory components and resolves
+        the filename against the basePath context key.
+      -->
+      <filename>${BASE_PATH}/ktr/01_filter_orders.ktr</filename>
+    </entry>
+
+    <entry>
+      <name>enrich_customers</name>
+      <type>TRANS</type>
+      <filename>${BASE_PATH}/ktr/02_enrich_customers.ktr</filename>
+    </entry>
+
+    <entry>
+      <name>enrich_products</name>
+      <type>TRANS</type>
+      <filename>${BASE_PATH}/ktr/03_enrich_products.ktr</filename>
+    </entry>
+
+    <entry>
+      <name>SUCCESS</name>
+      <type>SPECIAL</type>
+      <success>Y</success>
+    </entry>
+  </entries>
+
+  <hops>
+    <hop>
+      <from>START</from>
+      <to>filter_orders</to>
+      <enabled>Y</enabled>
+      <unconditional>Y</unconditional>
+    </hop>
+    <hop>
+      <from>filter_orders</from>
+      <to>enrich_customers</to>
+      <enabled>Y</enabled>
+      <evaluation>true</evaluation>
+      <unconditional>N</unconditional>
+    </hop>
+    <hop>
+      <from>enrich_customers</from>
+      <to>enrich_products</to>
+      <enabled>Y</enabled>
+      <evaluation>true</evaluation>
+      <unconditional>N</unconditional>
+    </hop>
+    <hop>
+      <from>enrich_products</from>
+      <to>SUCCESS</to>
+      <enabled>Y</enabled>
+      <evaluation>true</evaluation>
+      <unconditional>N</unconditional>
+    </hop>
+  </hops>
+</job>

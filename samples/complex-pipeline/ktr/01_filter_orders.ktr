@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KTR 1: Filter Orders by Status
+  ================================
+  Reads orders.csv, routes CONFIRMED rows to confirmed_orders.csv
+  and all other rows to rejected_orders.csv.
+
+  Demonstrates: CsvInput, FilterRows (fan-out routing), TextFileOutput (with header)
+-->
+<transformation>
+  <info>
+    <name>01_filter_orders</name>
+    <parameters>
+      <parameter>
+        <name>BASE_PATH</name>
+        <default_value></default_value>
+      </parameter>
+    </parameters>
+  </info>
+
+  <!-- ─── Source step ──────────────────────────────────────────── -->
+  <step>
+    <name>read_orders</name>
+    <type>CsvInput</type>
+    <filename>${BASE_PATH}/input/orders.csv</filename>
+    <header>Y</header>
+    <separator>,</separator>
+    <enclosure>&quot;</enclosure>
+    <!-- Field declarations let KtrParser build the column schema so that downstream
+         steps can resolve column names (e.g. "status") to 0-based indices. -->
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Routing step (fan-out) ──────────────────────────────── -->
+  <step>
+    <name>filter_status</name>
+    <type>FilterRows</type>
+    <send_true_to>confirmed_output</send_true_to>
+    <send_false_to>rejected_output</send_false_to>
+    <!-- Flat <compare> format: KtrParser resolves "status" → column index 5 -->
+    <compare>
+      <fieldname>status</fieldname>
+      <value>CONFIRMED</value>
+    </compare>
+  </step>
+
+  <!-- ─── Sink: confirmed orders (CONFIRMED rows with header) ──── -->
+  <step>
+    <name>confirmed_output</name>
+    <type>TextFileOutput</type>
+    <file>
+      <name>${BASE_PATH}/output/confirmed_orders.csv</name>
+      <separator>,</separator>
+      <header>Y</header>
+    </file>
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Sink: rejected / non-CONFIRMED orders (with header) ──── -->
+  <step>
+    <name>rejected_output</name>
+    <type>TextFileOutput</type>
+    <file>
+      <name>${BASE_PATH}/output/rejected_orders.csv</name>
+      <separator>,</separator>
+      <header>Y</header>
+    </file>
+    <fields>
+      <field><name>order_id</name></field>
+      <field><name>customer_id</name></field>
+      <field><name>product_id</name></field>
+      <field><name>quantity</name></field>
+      <field><name>unit_price</name></field>
+      <field><name>status</name></field>
+    </fields>
+  </step>
+
+  <!-- ─── Hop definitions ──────────────────────────────────────── -->
+  <order>
+    <hop>
+      <from>read_orders</from>
+      <to>filter_status</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>filter_status</from>
+      <to>confirmed_output</to>
+      <enabled>Y</enabled>
+    </hop>
+    <hop>
+      <from>filter_status</from>
+      <to>rejected_output</to>
+      <enabled>Y</enabled>
+    </hop>
+  </order>
+</transformation>

@@ -584,6 +584,8 @@ public final class KtrParser {
                 // Resolve output field names to 0-based column indices using the upstream schema.
                 // This allows TextFileOutputStep to write only the specified columns in order.
                 if (sd.params.containsKey("outputFields")) {
+                    // Preserve original names for header writing before resolving to indices
+                    sd.params.put("fieldNames", sd.params.get("outputFields"));
                     resolveColumnNames(sd.params, "outputFields", sd.id, upstreamOf, fieldSchemas);
                     sd.params.put("outputCols", sd.params.remove("outputFields"));
                 }

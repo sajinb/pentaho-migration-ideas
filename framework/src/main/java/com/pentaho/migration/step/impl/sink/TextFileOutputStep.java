@@ -15,24 +15,30 @@ import java.util.Map;
  *
  * <p>Params:
  * <ul>
- *   <li>{@code filePath}     — output file path (required)
- *   <li>{@code writeHeader}  — "true" to write a CSV header row derived from {@code outputCols}
- *   <li>{@code outputCols}   — comma-separated 0-based column indices to write, in order.
- *                              When absent all columns are written.
+ *   <li>{@code filePath}    — output file path (required)
+ *   <li>{@code writeHeader} — "true" to write a CSV header row before data rows
+ *   <li>{@code fieldNames}  — comma-separated column names used as header values
+ *   <li>{@code outputCols}  — comma-separated 0-based column indices to write, in order.
+ *                             When absent all columns are written.
  * </ul>
  */
 public class TextFileOutputStep extends AbstractSinkStep {
 
     private String   filePath;
     private boolean  writeHeader = false;
-    private int[]    outputCols;   // null = write all columns
-    private String[] header;       // parallel to outputCols, populated when writeHeader=true
+    private String[] fieldNames;  // header column names (from KTR <fields>/<field>/<name>)
+    private int[]    outputCols;  // null = write all columns
     private BufferedWriter writer;
 
     @Override
     public void configure(Map<String, String> params) {
         filePath    = params.get("filePath");
         writeHeader = "true".equalsIgnoreCase(params.getOrDefault("writeHeader", "false"));
+
+        String fnames = params.get("fieldNames");
+        if (fnames != null && !fnames.isBlank()) {
+            fieldNames = fnames.split(",");
+        }
 
         String cols = params.get("outputCols");
         if (cols != null && !cols.isBlank()) {
@@ -52,6 +58,10 @@ public class TextFileOutputStep extends AbstractSinkStep {
                     "TextFileOutput: 'filePath' param is null/blank — " +
                     "check ${VAR} resolution or the KTR <file>/<name> configuration");
         writer = Files.newBufferedWriter(Paths.get(filePath));
+        if (writeHeader && fieldNames != null && fieldNames.length > 0) {
+            writer.write(CsvUtil.formatLine(fieldNames));
+            writer.newLine();
+        }
     }
 
     @Override

@@ -502,6 +502,73 @@ class TransformationExecutorTest {
     }
 
     // -------------------------------------------------------------------------
+    // TextFileOutput header writing + chained-KTR read-back
+    // -------------------------------------------------------------------------
+
+    @Test
+    void textFileOutputWritesHeader_andChainedKtrReadsItCorrectly() throws Exception {
+        // KTR 1: CsvInput (with header) → SortRows → TextFileOutput (writeHeader=true, fieldNames set)
+        // KTR 2: CsvInput (with header, reads KTR-1 output) → TextFileOutput
+        // Without header writing, KTR 2 would skip the first data row, losing a record.
+
+        Path input   = writeCsv("input.csv",
+                "id,first_name,last_name,status",
+                "1,Alice,Ng,ACTIVE",
+                "3,Chandra,Khan,ACTIVE");
+        Path middle  = tmp.resolve("filtered.csv");
+        Path output  = tmp.resolve("final.csv");
+
+        // ── KTR 1: sort by last_name, first_name, write with header ───────────
+        TransformationDefinition ktr1 = new TransformationDefinition();
+        ktr1.name  = "sort_ktr";
+        ktr1.steps = List.of(
+            step("src",  "CsvInput",       Map.of("filePath", input.toString(), "hasHeader", "true")),
+            step("sort", "SortRows",        Map.of("columns", "2,1")),  // last_name=2, first_name=1
+            step("out",  "TextFileOutput",  Map.of(
+                "filePath",    middle.toString(),
+                "writeHeader", "true",
+                "fieldNames",  "id,first_name,last_name,status",
+                "outputCols",  "0,1,2,3"
+            ))
+        );
+        ktr1.hops = List.of(hop("src", "sort"), hop("sort", "out"));
+
+        new TransformationExecutor(StepRegistry.withDefaults()).execute(ktr1);
+
+        // Verify KTR 1 output has header + 2 data rows, sorted Khan < Ng
+        List<String> ktr1Lines = Files.readAllLines(middle);
+        assertEquals(3, ktr1Lines.size(), "header + 2 data rows");
+        assertEquals("id,first_name,last_name,status", ktr1Lines.get(0), "header row");
+        assertTrue(ktr1Lines.get(1).contains("Khan"),   "Khan (sorted first alphabetically)");
+        assertTrue(ktr1Lines.get(2).contains("Ng"),     "Ng (sorted second)");
+
+        // ── KTR 2: read the output of KTR 1 (which has a header), write final ──
+        TransformationDefinition ktr2 = new TransformationDefinition();
+        ktr2.name  = "write_ktr";
+        ktr2.steps = List.of(
+            step("src2", "CsvInput",      Map.of("filePath", middle.toString(), "hasHeader", "true")),
+            step("out2", "TextFileOutput", Map.of(
+                "filePath",    output.toString(),
+                "writeHeader", "true",
+                "fieldNames",  "id,first_name,last_name,status",
+                "outputCols",  "0,1,2,3"
+            ))
+        );
+        ktr2.hops = List.of(hop("src2", "out2"));
+
+        new TransformationExecutor(StepRegistry.withDefaults()).execute(ktr2);
+
+        // Both records must survive the chain: neither Alice/Ng nor Chandra/Khan dropped
+        List<String> finalLines = Files.readAllLines(output);
+        assertEquals(3, finalLines.size(), "header + 2 data rows in final output");
+        assertEquals("id,first_name,last_name,status", finalLines.get(0));
+        long khans = finalLines.stream().filter(l -> l.contains("Khan")).count();
+        long ngs   = finalLines.stream().filter(l -> l.contains("Ng")).count();
+        assertEquals(1, khans, "Chandra/Khan must appear in final output");
+        assertEquals(1, ngs,   "Alice/Ng must appear in final output");
+    }
+
+    // -------------------------------------------------------------------------
     // Builder helpers
     // -------------------------------------------------------------------------
 

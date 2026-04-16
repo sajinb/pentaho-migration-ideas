@@ -132,9 +132,14 @@ public final class KtrParser {
         Document doc = builder.parse(ktrXml);
         doc.getDocumentElement().normalize();
 
+        // Build named-connection map from root-level <connection> elements so that
+        // TableInput (and TableOutput) steps that reference a connection by name can
+        // have their JDBC params resolved before the YAML is emitted.
+        Map<String, Element> namedConnections = buildNamedConnectionsMap(doc);
+
         // Pre-compute field schemas (stepName → ordered field names) and hop topology
         // so KtrParser can resolve column names to 0-based indices before emitting YAML.
-        Map<String, List<String>> fieldSchemas    = buildFieldSchemas(doc);
+        Map<String, List<String>> fieldSchemas    = buildFieldSchemas(doc, namedConnections);
         Map<String, String>       upstreamOf      = buildUpstreamMap(doc);
         Map<String, List<String>> downstreamOf    = buildDownstreamMap(doc);
         // All upstreams per step (used to infer MergeJoin step1/step2 when absent from XML)
@@ -154,7 +159,8 @@ public final class KtrParser {
         TransformationDefinition def = new TransformationDefinition();
         def.name       = extractName(doc);
         def.parameters = extractParameters(doc);
-        def.steps      = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf);
+        def.steps      = extractSteps(doc, fieldSchemas, upstreamOf, downstreamOf, allUpstreamsOf,
+                                      namedConnections);
         def.hops       = extractHops(doc);
         // Append synthetic hops so the executor wires both inputs to StreamLookup steps
         def.hops.addAll(syntheticHops);
@@ -181,8 +187,13 @@ public final class KtrParser {
      * <p>Non-source steps (SortRows, GroupBy, …) also use {@code <fields>} for different
      * purposes (sort keys, aggregate definitions). Collecting those would produce incomplete
      * or wrong schemas that break downstream column resolution.
+     *
+     * <p>For {@code TableInput} steps the schema is inferred from the SQL {@code SELECT} clause
+     * when the query is simple enough (no {@code *}, no function calls). Column aliases
+     * ({@code AS name}) and table-qualified names ({@code t.col}) are handled.
      */
-    private static Map<String, List<String>> buildFieldSchemas(Document doc) {
+    private static Map<String, List<String>> buildFieldSchemas(Document doc,
+                                                                Map<String, Element> namedConnections) {
         Map<String, List<String>> schemas = new LinkedHashMap<>();
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         for (int i = 0; i < stepNodes.getLength(); i++) {
@@ -190,20 +201,84 @@ public final class KtrParser {
             if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
             String stepName = text(el, "name");
             String stepType = normalizeType(text(el, "type"));
-            if (stepName == null || !SCHEMA_SOURCE_TYPES.contains(stepType)) continue;
-            List<String> names = new ArrayList<>();
-            NodeList fieldsEls = el.getElementsByTagName("fields");
-            if (fieldsEls.getLength() > 0) {
-                Element fields = (Element) fieldsEls.item(0);
-                NodeList fieldEls = fields.getElementsByTagName("field");
-                for (int j = 0; j < fieldEls.getLength(); j++) {
-                    String fname = text((Element) fieldEls.item(j), "name");
-                    if (fname != null && !fname.isBlank()) names.add(fname);
+            if (stepName == null) continue;
+
+            if (SCHEMA_SOURCE_TYPES.contains(stepType)) {
+                // Source steps declare their schema via <fields>/<field>/<name>
+                List<String> names = new ArrayList<>();
+                NodeList fieldsEls = el.getElementsByTagName("fields");
+                if (fieldsEls.getLength() > 0) {
+                    Element fields = (Element) fieldsEls.item(0);
+                    NodeList fieldEls = fields.getElementsByTagName("field");
+                    for (int j = 0; j < fieldEls.getLength(); j++) {
+                        String fname = text((Element) fieldEls.item(j), "name");
+                        if (fname != null && !fname.isBlank()) names.add(fname);
+                    }
                 }
+                if (!names.isEmpty()) schemas.put(stepName, names);
+
+            } else if ("TableInput".equals(stepType)) {
+                // TableInput: infer schema from the SQL SELECT clause when it is simple enough.
+                String sql = text(el, "sql");
+                List<String> cols = parseSqlSelectColumns(sql);
+                if (!cols.isEmpty()) schemas.put(stepName, cols);
             }
-            if (!names.isEmpty()) schemas.put(stepName, names);
         }
         return schemas;
+    }
+
+    /**
+     * Extracts output column names from a simple {@code SELECT col1, col2 FROM …} statement.
+     *
+     * <p>Returns an empty list when the query is too complex to parse reliably (e.g. contains
+     * {@code *}, aggregate functions, or sub-queries). The caller should fall back to leaving
+     * the schema unknown in that case.
+     *
+     * <p>Handles:
+     * <ul>
+     *   <li>Plain names: {@code SELECT CUST_ID, NAME FROM …} → {@code [CUST_ID, NAME]}</li>
+     *   <li>Table-qualified: {@code SELECT t.CUST_ID FROM …} → {@code [CUST_ID]}</li>
+     *   <li>Aliases: {@code SELECT t.CUST_ID AS ID FROM …} → {@code [ID]}</li>
+     * </ul>
+     */
+    static List<String> parseSqlSelectColumns(String sql) {
+        if (sql == null || sql.isBlank()) return List.of();
+        // Normalise whitespace (CDATA content may have extra newlines/spaces)
+        String norm = sql.replaceAll("(?s)\\s+", " ").trim();
+        String upper = norm.toUpperCase();
+        int selectIdx = upper.indexOf("SELECT ");
+        int fromIdx   = upper.indexOf(" FROM ");
+        if (selectIdx < 0 || fromIdx <= selectIdx + 7) return List.of();
+
+        String colSection = norm.substring(selectIdx + 7, fromIdx).trim();
+
+        // Bail out on constructs we can't parse safely
+        if (colSection.contains("*")
+                || colSection.contains("(")
+                || upper.startsWith("SELECT DISTINCT ")) {
+            return List.of();
+        }
+
+        List<String> result = new ArrayList<>();
+        for (String token : colSection.split(",")) {
+            token = token.trim();
+            if (token.isEmpty()) continue;
+
+            // "col AS alias"  →  take alias
+            int asIdx = token.toUpperCase().lastIndexOf(" AS ");
+            String name;
+            if (asIdx >= 0) {
+                name = token.substring(asIdx + 4).trim();
+            } else {
+                // "table.col"  →  take col; otherwise take as-is
+                int dot = token.lastIndexOf('.');
+                name = dot >= 0 ? token.substring(dot + 1).trim() : token;
+            }
+            // Remove any surrounding quotes
+            name = name.replace("\"", "").replace("`", "").replace("'", "").trim();
+            if (!name.isEmpty()) result.add(name);
+        }
+        return result;
     }
 
     /**
@@ -521,7 +596,8 @@ public final class KtrParser {
                                                Map<String, List<String>> fieldSchemas,
                                                Map<String, String> upstreamOf,
                                                Map<String, List<String>> downstreamOf,
-                                               Map<String, List<String>> allUpstreamsOf) {
+                                               Map<String, List<String>> allUpstreamsOf,
+                                               Map<String, Element> namedConnections) {
         List<StepDefinition> steps = new ArrayList<>();
         NodeList stepNodes = doc.getDocumentElement().getElementsByTagName("step");
         for (int i = 0; i < stepNodes.getLength(); i++) {
@@ -588,6 +664,20 @@ public final class KtrParser {
                     sd.params.put("fieldNames", sd.params.get("outputFields"));
                     resolveColumnNames(sd.params, "outputFields", sd.id, upstreamOf, fieldSchemas);
                     sd.params.put("outputCols", sd.params.remove("outputFields"));
+                }
+            } else if ("TableInput".equals(sd.type) || "TableOutput".equals(sd.type)) {
+                // If the mapper found no JDBC params (connection was a name reference, not inline),
+                // resolve the named connection from the transformation's root-level <connection>
+                // elements and inject the JDBC params into sd.params.
+                if (!sd.params.containsKey("jdbcUrl") && !sd.params.containsKey("jdbcDriver")
+                        && !sd.params.containsKey("dbType")) {
+                    String connName = text(el, "connection");
+                    if (connName != null && !connName.isBlank()) {
+                        Element connEl = namedConnections.get(connName);
+                        if (connEl != null) {
+                            injectConnectionParams(connEl, sd.params);
+                        }
+                    }
                 }
             } else if ("StreamLookup".equals(sd.type)) {
                 // Determine which input index is the lookup stream vs. the main stream.
@@ -818,6 +908,98 @@ public final class KtrParser {
             }
         }
         return params;
+    }
+
+    // =========================================================================
+    // Named connection helpers
+    // =========================================================================
+
+    /**
+     * Builds a map of connection name → {@code <connection>} element from root-level
+     * {@code <connection>} elements in the transformation document.
+     *
+     * <p>Pentaho KTR files declare shared JDBC connections at the transformation root:
+     * <pre>
+     * &lt;transformation&gt;
+     *   &lt;connection&gt;
+     *     &lt;name&gt;ORACLE_CONN&lt;/name&gt;
+     *     &lt;server&gt;db-host&lt;/server&gt;
+     *     &lt;port&gt;1521&lt;/port&gt;
+     *     &lt;database&gt;MYDB&lt;/database&gt;
+     *     &lt;type&gt;ORACLE&lt;/type&gt;
+     *     &lt;username&gt;scott&lt;/username&gt;
+     *     &lt;password&gt;tiger&lt;/password&gt;
+     *   &lt;/connection&gt;
+     * &lt;/transformation&gt;
+     * </pre>
+     * TableInput / TableOutput steps then reference a connection by name via
+     * {@code <connection>ORACLE_CONN</connection>} inside the step element.
+     */
+    private static Map<String, Element> buildNamedConnectionsMap(Document doc) {
+        Map<String, Element> map = new LinkedHashMap<>();
+        NodeList connNodes = doc.getDocumentElement().getElementsByTagName("connection");
+        for (int i = 0; i < connNodes.getLength(); i++) {
+            if (!(connNodes.item(i) instanceof Element el)) continue;
+            // Only direct children of the transformation root are named connections;
+            // ignore <connection> elements nested inside step definitions.
+            if (!el.getParentNode().equals(doc.getDocumentElement())) continue;
+            // A named connection element has a <name> child; a step-level reference does not.
+            String name = text(el, "name");
+            if (name != null && !name.isBlank()) {
+                map.put(name, el);
+            }
+        }
+        return map;
+    }
+
+    /**
+     * Injects JDBC connection params derived from a root-level {@code <connection>} element
+     * into a step's params map. Mirrors the logic in {@link TableInputMapper}.
+     */
+    private static void injectConnectionParams(Element conn, Map<String, String> params) {
+        // Driver: explicit <driver> wins; otherwise derive from <type>
+        String explicitDriver = text(conn, "driver");
+        if (explicitDriver != null && !explicitDriver.isBlank()) {
+            params.put("jdbcDriver", explicitDriver);
+        } else {
+            String pentahoType = text(conn, "type");
+            if (pentahoType != null) {
+                String dbType = switch (pentahoType.toUpperCase()) {
+                    case "ORACLE"      -> "oracle";
+                    case "MYSQL"       -> "mysql";
+                    case "POSTGRESQL"  -> "postgresql";
+                    case "MSSQLNATIVE", "MSSQL" -> "sqlserver";
+                    case "H2"          -> "h2";
+                    case "DB2"         -> "db2";
+                    default            -> null;
+                };
+                if (dbType != null) params.put("dbType", dbType);
+            }
+        }
+
+        // URL: explicit <jdbcUrl> wins; otherwise emit individual parts for JdbcUtil
+        String explicitUrl = text(conn, "jdbcUrl");
+        if (explicitUrl != null && !explicitUrl.isBlank()) {
+            params.put("jdbcUrl", explicitUrl);
+        } else {
+            putIfNotBlank(params, "jdbcHost", text(conn, "server"));
+            putIfNotBlank(params, "jdbcPort", text(conn, "port"));
+            String pentahoType = text(conn, "type");
+            String dbName = text(conn, "database");
+            if ("ORACLE".equalsIgnoreCase(pentahoType) && dbName != null) {
+                params.put("jdbcSid", dbName);
+            } else {
+                putIfNotBlank(params, "jdbcDatabase", dbName);
+            }
+        }
+
+        // Credentials
+        putIfNotBlank(params, "jdbcUser",     text(conn, "username"));
+        putIfNotBlank(params, "jdbcPassword", text(conn, "password"));
+    }
+
+    private static void putIfNotBlank(Map<String, String> map, String key, String value) {
+        if (value != null && !value.isBlank()) map.put(key, value);
     }
 
     /**

@@ -42,7 +42,12 @@ public final class CsvInputMapper implements StepXmlMapper {
         // hasHeader / separator / enclosure: getElementsByTagName searches all descendants,
         // so both flat <header> and <content><header> are found automatically.
         put(p, "hasHeader", yesNo(child(e, "header", "Y")));
-        put(p, "separator", child(e, "separator", ","));
+
+        // Older Pentaho KTR exports use <delimiter> instead of <separator>.
+        String sep = child(e, "separator");
+        if (sep == null) sep = child(e, "delimiter");
+        put(p, "separator", sep != null ? sep : ",");
+
         put(p, "enclosure", child(e, "enclosure", "\""));
         return p;
     }

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1732,5 +1733,267 @@ class KtrParserTest {
         assertNull(out.params.get("outputFields"), "outputFields must be replaced by outputCols");
         assertEquals("2,3", out.params.get("outputCols"),
                 "country=col2, segment=col3 in upstream [id,name,country,segment]");
+    }
+
+    // =========================================================================
+    // CSV_Oracle_Merge pattern: <delimiter>, SortRows <ascending>, named connection,
+    // MergeJoin key with "StepName.field" prefix
+    // =========================================================================
+
+    /** CsvInputMapper must accept <delimiter> as a synonym for <separator>. */
+    @Test
+    void csvInput_delimiter_treatedAsSeparator() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <step>
+                    <name>ReadCsv</name><type>CsvInput</type>
+                    <filename>/data/in.csv</filename>
+                    <delimiter>|</delimiter>
+                    <header>Y</header>
+                    <fields><field><name>a</name></field></fields>
+                  </step>
+                  <order/>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition step = def.steps.get(0);
+        assertEquals("|", step.params.get("separator"),
+                "<delimiter> must be mapped to the 'separator' param");
+    }
+
+    /** SortRowsMapper must emit an 'ascending' param reflecting <ascending>Y/N</ascending>. */
+    @Test
+    void sortRows_ascendingFlag_emitted() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <step>
+                    <name>Src</name><type>CsvInput</type>
+                    <filename>/data/in.csv</filename><header>Y</header>
+                    <fields>
+                      <field><name>col_a</name></field>
+                      <field><name>col_b</name></field>
+                    </fields>
+                  </step>
+                  <step>
+                    <name>Sort</name><type>SortRows</type>
+                    <fields>
+                      <field><name>col_a</name><ascending>Y</ascending></field>
+                      <field><name>col_b</name><ascending>N</ascending></field>
+                    </fields>
+                  </step>
+                  <order>
+                    <hop><from>Src</from><to>Sort</to><enabled>Y</enabled></hop>
+                  </order>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition sort = def.steps.stream()
+                .filter(s -> "Sort".equals(s.id)).findFirst().orElseThrow();
+        // col_a=0, col_b=1 in upstream schema
+        assertEquals("0,1", sort.params.get("columns"), "columns resolved to indices");
+        assertEquals("true,false", sort.params.get("ascending"),
+                "ascending: Y→true, N→false");
+    }
+
+    /** SortRowsMapper also understands <sort_direction>ascending/descending</sort_direction>. */
+    @Test
+    void sortRows_sortDirection_alternateFormat() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <step>
+                    <name>Src</name><type>CsvInput</type>
+                    <filename>/data/in.csv</filename><header>Y</header>
+                    <fields>
+                      <field><name>price</name></field>
+                    </fields>
+                  </step>
+                  <step>
+                    <name>Sort</name><type>SortRows</type>
+                    <fields>
+                      <field><name>price</name><sort_direction>descending</sort_direction></field>
+                    </fields>
+                  </step>
+                  <order>
+                    <hop><from>Src</from><to>Sort</to><enabled>Y</enabled></hop>
+                  </order>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition sort = def.steps.stream()
+                .filter(s -> "Sort".equals(s.id)).findFirst().orElseThrow();
+        assertEquals("false", sort.params.get("ascending"), "<sort_direction>descending → false");
+    }
+
+    /**
+     * KtrParser resolves a named connection referenced by a TableInput step.
+     * Root-level {@code <connection>} elements with a {@code <name>} child supply the JDBC params.
+     */
+    @Test
+    void tableInput_namedConnection_resolvedFromRoot() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <!-- Root-level named connection definition -->
+                  <connection>
+                    <name>ORACLE_CONN</name>
+                    <server>oracle-host</server>
+                    <port>1521</port>
+                    <database>MYDB</database>
+                    <type>ORACLE</type>
+                    <username>scott</username>
+                    <password>tiger</password>
+                  </connection>
+                  <step>
+                    <name>ReadOracle</name>
+                    <type>TableInput</type>
+                    <!-- Name reference only — no inline connection block -->
+                    <connection>ORACLE_CONN</connection>
+                    <sql><![CDATA[SELECT CUST_ID, NAME, AGE FROM CUSTOMERS]]></sql>
+                  </step>
+                  <order/>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition step = def.steps.get(0);
+        // JDBC params must be resolved from the named connection
+        assertEquals("oracle",      step.params.get("dbType"),      "dbType");
+        assertEquals("oracle-host", step.params.get("jdbcHost"),    "jdbcHost");
+        assertEquals("1521",        step.params.get("jdbcPort"),    "jdbcPort");
+        assertEquals("MYDB",        step.params.get("jdbcSid"),     "jdbcSid (Oracle uses SID)");
+        assertEquals("scott",       step.params.get("jdbcUser"),    "jdbcUser");
+        assertEquals("tiger",       step.params.get("jdbcPassword"),"jdbcPassword");
+        // SQL preserved
+        assertNotNull(step.params.get("query"), "query must be present");
+        assertTrue(step.params.get("query").contains("CUST_ID"), "SQL content preserved");
+    }
+
+    /**
+     * KtrParser extracts column names from a simple SELECT for TableInput schema propagation.
+     * This allows downstream SortRows / MergeJoin to resolve field names to indices.
+     */
+    @Test
+    void tableInput_sqlSelectColumns_usedForSchemaAndSortResolution() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <connection>
+                    <name>DB</name><server>h</server><port>5432</port>
+                    <database>d</database><type>POSTGRESQL</type>
+                    <username>u</username><password>p</password>
+                  </connection>
+                  <step>
+                    <name>ReadDB</name><type>TableInput</type>
+                    <connection>DB</connection>
+                    <sql>SELECT CUST_ID, NAME, AGE FROM CUSTOMERS</sql>
+                  </step>
+                  <step>
+                    <name>SortDB</name><type>SortRows</type>
+                    <fields>
+                      <field><name>CUST_ID</name><ascending>Y</ascending></field>
+                    </fields>
+                  </step>
+                  <order>
+                    <hop><from>ReadDB</from><to>SortDB</to><enabled>Y</enabled></hop>
+                  </order>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition sort = def.steps.stream()
+                .filter(s -> "SortDB".equals(s.id)).findFirst().orElseThrow();
+        // CUST_ID is at index 0 in [CUST_ID, NAME, AGE]
+        assertEquals("0", sort.params.get("columns"),
+                "CUST_ID resolved to index 0 via SQL schema");
+    }
+
+    /** parseSqlSelectColumns utility handles aliases and table-qualified names. */
+    @Test
+    void parseSqlSelectColumns_variousFormats() {
+        // Plain names
+        assertEquals(List.of("CUST_ID", "NAME", "AGE"),
+                KtrParser.parseSqlSelectColumns("SELECT CUST_ID, NAME, AGE FROM CUSTOMERS"));
+        // Table-qualified
+        assertEquals(List.of("CUST_ID", "NAME"),
+                KtrParser.parseSqlSelectColumns("SELECT t.CUST_ID, t.NAME FROM T t"));
+        // Aliases
+        assertEquals(List.of("ID", "FULLNAME"),
+                KtrParser.parseSqlSelectColumns("SELECT t.CUST_ID AS ID, t.NAME AS FULLNAME FROM T t"));
+        // SELECT * → empty (can't determine schema)
+        assertTrue(KtrParser.parseSqlSelectColumns("SELECT * FROM T").isEmpty());
+        // Aggregate function → empty
+        assertTrue(KtrParser.parseSqlSelectColumns("SELECT COUNT(*) FROM T").isEmpty());
+        // Null/blank → empty
+        assertTrue(KtrParser.parseSqlSelectColumns(null).isEmpty());
+        assertTrue(KtrParser.parseSqlSelectColumns("  ").isEmpty());
+    }
+
+    /**
+     * MergeJoinMapper strips the "StepName." prefix from key values.
+     * Older Pentaho exports write {@code <key>StepName.FieldName</key>}.
+     */
+    @Test
+    void mergeJoin_stepNamePrefixStrippedFromKeys() throws Exception {
+        String xml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <transformation>
+                  <info><name>t</name></info>
+                  <step>
+                    <name>Read CSV</name><type>CsvInput</type>
+                    <filename>/data/in.csv</filename><header>Y</header>
+                    <fields>
+                      <field><name>CUST_ID</name></field>
+                      <field><name>CITY</name></field>
+                    </fields>
+                  </step>
+                  <step>
+                    <name>Read Oracle</name><type>CsvInput</type>
+                    <filename>/data/ora.csv</filename><header>Y</header>
+                    <fields>
+                      <field><name>CUST_ID</name></field>
+                      <field><name>NAME</name></field>
+                    </fields>
+                  </step>
+                  <step>
+                    <name>Sort CSV</name><type>SortRows</type>
+                    <fields><field><name>CUST_ID</name><ascending>Y</ascending></field></fields>
+                  </step>
+                  <step>
+                    <name>Sort Oracle</name><type>SortRows</type>
+                    <fields><field><name>CUST_ID</name><ascending>Y</ascending></field></fields>
+                  </step>
+                  <step>
+                    <name>Merge Join</name><type>MergeJoin</type>
+                    <join_type>INNER</join_type>
+                    <step1>Sort CSV</step1>
+                    <step2>Sort Oracle</step2>
+                    <!-- Older format: step-qualified key names -->
+                    <keys_1><key>Read CSV.CUST_ID</key></keys_1>
+                    <keys_2><key>Read Oracle.CUST_ID</key></keys_2>
+                  </step>
+                  <order>
+                    <hop><from>Read CSV</from><to>Sort CSV</to><enabled>Y</enabled></hop>
+                    <hop><from>Read Oracle</from><to>Sort Oracle</to><enabled>Y</enabled></hop>
+                    <hop><from>Sort CSV</from><to>Merge Join</to><enabled>Y</enabled></hop>
+                    <hop><from>Sort Oracle</from><to>Merge Join</to><enabled>Y</enabled></hop>
+                  </order>
+                </transformation>
+                """;
+        TransformationDefinition def = parse(xml);
+        StepDefinition merge = def.steps.stream()
+                .filter(s -> "Merge Join".equals(s.id)).findFirst().orElseThrow();
+
+        // "Read CSV.CUST_ID" → stripped to "CUST_ID" → resolved to index 0 in [CUST_ID, CITY]
+        assertEquals("0", merge.params.get("leftColumns"),
+                "leftColumns: CUST_ID is index 0 in Sort CSV's schema");
+        // "Read Oracle.CUST_ID" → stripped to "CUST_ID" → resolved to index 0 in [CUST_ID, NAME]
+        assertEquals("0", merge.params.get("rightColumns"),
+                "rightColumns: CUST_ID is index 0 in Sort Oracle's schema");
     }
 }

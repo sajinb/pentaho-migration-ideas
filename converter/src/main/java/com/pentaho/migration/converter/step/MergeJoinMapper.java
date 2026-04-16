@@ -66,10 +66,12 @@ public final class MergeJoinMapper implements StepXmlMapper {
     /**
      * Collects all key column names inside the named container element.
      *
-     * <p>Handles two key formats:
+     * <p>Handles three key formats:
      * <ul>
      *   <li>{@code <key>columnName</key>} — direct text content (Format A)</li>
      *   <li>{@code <key><name>columnName</name></key>} — nested {@code <name>} child (Format B)</li>
+     *   <li>{@code <key>StepName.columnName</key>} — step-qualified name (older exports);
+     *       the {@code StepName.} prefix is stripped, leaving only the field name.</li>
      * </ul>
      */
     private static String collectKeys(Element e, String containerTag) {
@@ -85,6 +87,10 @@ public final class MergeJoinMapper implements StepXmlMapper {
             String k = (nameEls.getLength() > 0)
                     ? nameEls.item(0).getTextContent().trim()
                     : keyEl.getTextContent().trim();
+            if (k.isBlank()) continue;
+            // Strip "StepName." prefix: older Pentaho exports write "StepName.FieldName"
+            int dot = k.lastIndexOf('.');
+            if (dot >= 0) k = k.substring(dot + 1).trim();
             if (!k.isBlank()) names.add(k);
         }
         return names.isEmpty() ? null : String.join(",", names);
